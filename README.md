@@ -27,6 +27,9 @@ MoviePilot v3 插件：按你设定的「每周几 / 几点」，自动到指定
 2. 在插件市场里找到「定时订阅下载」，点击安装
 3. 安装后到「插件」页打开，即可使用
 
+> 国内网络无法直连 GitHub 时，可在仓库地址前加加速前缀，例如：
+> `https://gh-proxy.com/https://github.com/wzy631678/MoviePilot-Plugins`
+
 ### 方式二：本地安装
 
 1. 下载本仓库 `ptsubscriber` 目录，压缩成 `ptsubscriber.zip`（zip 根目录必须是 `ptsubscriber/`，不要多套一层文件夹）
