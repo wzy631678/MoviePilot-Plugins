@@ -7,3 +7,4 @@ Thumbs.db
 .vscode/
 *.log
 dist/*.zip
+push_to_github.py
