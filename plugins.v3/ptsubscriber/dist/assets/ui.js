@@ -41,7 +41,7 @@ const CSS = `
 .pts-empty h3{margin:0;font-size:16.5px;font-weight:700}
 .pts-empty p{margin:0;font-size:12.8px;color:var(--muted);max-width:430px;line-height:1.65}
 .pts-empty .pts-btn{margin-top:10px}
-.pts-tasks{display:grid;grid-template-columns:repeat(auto-fill,minmax(322px,1fr));gap:12px}
+.pts-tasks{display:grid;grid-template-columns:repeat(auto-fill,minmax(344px,1fr));gap:14px}
 .pts-pcard{position:relative;border:1px solid var(--line);border-radius:15px;overflow:hidden;background:var(--sur);cursor:pointer;transition:.18s}
 .pts-pcard:hover{border-color:rgba(139,92,246,.5);box-shadow:0 12px 28px rgba(17,24,39,.13);transform:translateY(-1px)}
 .pts-pcard.off{opacity:.62}
@@ -49,19 +49,19 @@ const CSS = `
 .pts-dark .pts-pcard .bg{opacity:.36}
 .pts-pcard .veil{position:absolute;inset:0;pointer-events:none;background:linear-gradient(90deg,rgba(255,255,255,.97) 6%,rgba(255,255,255,.9) 44%,rgba(255,255,255,.6));}
 .pts-dark .pts-pcard .veil{background:linear-gradient(90deg,rgba(27,30,38,.97) 6%,rgba(27,30,38,.9) 44%,rgba(27,30,38,.62))}
-.pts-pcard .in{position:relative;display:flex;gap:11px;padding:12px 12px 11px}
-.pts-poster{width:58px;height:84px;border-radius:9px;object-fit:cover;flex:none;background:var(--sur2);box-shadow:0 5px 14px rgba(0,0,0,.22)}
-.pts-poster.ph{display:grid;place-items:center;color:rgba(255,255,255,.92);font-weight:800;font-size:17px;background:linear-gradient(135deg,rgba(139,92,246,.85),rgba(167,139,250,.85));box-shadow:none;text-shadow:0 1px 3px rgba(0,0,0,.2)}
+.pts-pcard .in{position:relative;display:flex;gap:13px;padding:14px 14px 13px}
+.pts-poster{width:88px;height:126px;border-radius:10px;object-fit:cover;flex:none;background:var(--sur2);box-shadow:0 6px 16px rgba(0,0,0,.24)}
+.pts-poster.ph{display:grid;place-items:center;color:var(--acc);font-weight:800;font-size:26px;background:linear-gradient(160deg,var(--sur2),var(--sur3));border:1px solid var(--line);box-shadow:none}
 .pts-pbody{flex:1;min-width:0;display:flex;flex-direction:column;gap:5px}
 .pts-ptop{display:flex;align-items:flex-start;gap:7px;min-width:0}
 .pts-ptitle{display:flex;align-items:flex-start;gap:6px;flex:1;min-width:0}
 .pts-ptitle .pts-pname{flex:0 1 auto}
 .pts-pbar{position:absolute;left:0;right:0;bottom:0;height:2.5px;background:rgba(139,92,246,.13)}
 .pts-pbar>span{display:block;height:100%;background:linear-gradient(90deg,var(--acc),var(--acc2))}
-.pts-year{font-size:11px;color:var(--muted);font-weight:650;flex:none;padding-top:2px;font-variant-numeric:tabular-nums}
-.pts-pname{flex:1;min-width:0;font-size:14.6px;font-weight:720;line-height:1.32;word-break:break-word;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.pts-sbadge{font-size:10.5px;font-weight:750;color:var(--acc);background:var(--soft);border-radius:6px;padding:1px 6px;flex:none;margin-top:1px;letter-spacing:.3px}
-.pts-pfoot{display:flex;align-items:center;gap:8px;margin-top:auto;font-size:11.6px;color:var(--muted);padding-top:3px}
+.pts-year{font-size:11.6px;color:var(--muted);font-weight:650;flex:none;padding-top:3px;font-variant-numeric:tabular-nums}
+.pts-pname{flex:1;min-width:0;font-size:15.6px;font-weight:720;line-height:1.34;word-break:break-word;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.pts-sbadge{font-size:11px;font-weight:750;color:var(--acc);background:var(--soft);border-radius:6px;padding:1px 6px;flex:none;margin-top:1px;letter-spacing:.3px}
+.pts-pfoot{display:flex;align-items:center;gap:8px;margin-top:auto;font-size:12.2px;color:var(--muted);padding-top:3px}
 .pts-prog{display:inline-flex;align-items:center;gap:4px;font-weight:700;color:var(--on);font-variant-numeric:tabular-nums}
 .pts-prog .pts-ico{opacity:.7}
 .pts-pfoot .sp{flex:1}
@@ -72,6 +72,17 @@ const CSS = `
 .pts-menu button:hover{background:var(--soft);color:var(--acc)}
 .pts-menu button.danger{color:var(--danger)}
 .pts-menu button.danger:hover{background:rgba(220,38,38,.12);color:var(--danger)}
+.pts-pick{margin-top:12px;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--sur)}
+.pts-pick-h{display:flex;align-items:center;gap:7px;padding:8px 11px;background:var(--sur2);font-size:11.8px;color:var(--muted);border-bottom:1px solid var(--line)}
+.pts-pick-row{display:flex;gap:10px;align-items:center;padding:8px 11px;cursor:pointer;border-bottom:1px solid var(--line);transition:.12s}
+.pts-pick-row:last-child{border-bottom:0}
+.pts-pick-row:hover{background:var(--sur2)}
+.pts-pick-row.on{background:var(--soft)}
+.pts-pick-img{width:36px;height:52px;border-radius:6px;object-fit:cover;flex:none;background:var(--sur2)}
+.pts-pick-t{flex:1;min-width:0}
+.pts-pick-t b{font-size:13.2px;font-weight:650;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pts-pick-m{font-size:11.5px;color:var(--muted);margin-top:2px}
+.pts-pick-row .pts-pill{flex:none}
 .pts-chips{display:flex;flex-wrap:wrap;gap:6px;flex:1 1 auto;min-width:0}
 .pts-chip{border:1px solid var(--line);background:var(--sur);color:var(--on);border-radius:999px;padding:6px 13px;font-size:12.5px;cursor:pointer;transition:.15s;font-family:inherit;font-weight:500}
 .pts-chip:hover{border-color:rgba(139,92,246,.55)}
@@ -700,7 +711,7 @@ export function mountUI(root, api) {
     sec1.append(h1, el('div', 'pts-sec-desc',
       '订阅名称就是站点搜索关键词，填剧名即可；类型选剧集会自动到 TMDB 取海报和总集数。填了集数就一集一集补，不填就一次收下命中的资源'));
     const segKind = segmented([{ value: 'series', label: '剧集' }, { value: 'movie', label: '电影' }],
-      (sub && sub.kind) || 'series', () => { applyKind(); sync(); });
+      (sub && sub.kind) || 'series', () => { applyKind(); sync(); lookupSoon(); });
     const kindRow = el('div', 'pts-f');
     kindRow.style.marginBottom = '12px';
     kindRow.append(el('span', '', '类型'), segKind.node);
@@ -716,7 +727,9 @@ export function mountUI(root, api) {
     const g1b = el('div', 'pts-grid2');
     g1b.style.marginTop = '12px';
     g1b.append(field('订阅集数 · 从', fEpStart), field('到', fEpEnd));
-    sec1.append(g1, g1b);
+    const pickBox = el('div', 'pts-pick');
+    pickBox.style.display = 'none';
+    sec1.append(g1, pickBox, g1b);
     // 电影没有季/集概念，选了电影就把这两行收起来
     function applyKind() {
       const movie = segKind.get() === 'movie';
@@ -724,6 +737,100 @@ export function mountUI(root, api) {
       g1b.style.display = movie ? 'none' : '';
     }
     applyKind();
+
+    // ---- TMDB 候选：填名字实时查，同名作品让用户点选，避免认错 ----
+    let pickedMeta = sub && sub.tmdb_id ? {
+      tmdb_id: sub.tmdb_id, meta_title: sub.meta_title || sub.name, year: sub.year || '',
+      kind: sub.kind || 'series', total_eps: sub.total_eps || 0,
+      season_count: (sub.seasons || []).length, poster_url: sub.poster_url || '',
+    } : null;
+    let pickTimer = null;
+    let pickSeq = 0;
+
+    function metaLine(it) {
+      const bits = [];
+      if (it.year) bits.push(it.year);
+      bits.push(it.kind === 'movie' ? '电影' : ('剧集 · ' + ((it.season_count || 0) > 1 ? (it.season_count + ' 季') : '1 季')));
+      if (it.total_eps) bits.push('共 ' + it.total_eps + ' 集');
+      return bits.join(' · ');
+    }
+
+    function renderPick(rows, note) {
+      pickBox.innerHTML = '';
+      pickBox.style.display = '';
+      const head = el('div', 'pts-pick-h');
+      head.append(iconEl('search', 13), el('span', '', note || ''));
+      pickBox.append(head);
+      if (!rows.length) {
+        const empty = el('div', 'pts-pick-row');
+        empty.append(el('div', 'pts-pick-t', '没有匹配到作品，先照名字保存也行；之后卡片上点「同步海报」可以重试'));
+        pickBox.append(empty);
+        return;
+      }
+      for (const it of rows) {
+        const on = pickedMeta && pickedMeta.tmdb_id === it.tmdb_id;
+        const row = el('div', 'pts-pick-row' + (on ? ' on' : ''));
+        if (it.poster_url) {
+          const im = el('img', 'pts-pick-img');
+          im.src = it.poster_url;
+          im.alt = '';
+          im.loading = 'lazy';
+          im.addEventListener('error', () => im.remove());
+          row.append(im);
+        } else {
+          row.append(el('div', 'pts-pick-img'));
+        }
+        const t = el('div', 'pts-pick-t');
+        t.append(el('b', '', it.meta_title || ''));
+        t.append(el('div', 'pts-pick-m', metaLine(it)));
+        row.append(t);
+        if (on) row.append(el('span', 'pts-pill ok', '已选'));
+        row.addEventListener('click', () => {
+          pickedMeta = it;
+          if (it.kind && it.kind !== segKind.get()) {
+            segKind.set(it.kind);
+            applyKind();
+          }
+          renderPick(rows, '已锁定：' + (it.meta_title || '') + '（' + metaLine(it) + '）');
+          sync();
+        });
+        pickBox.append(row);
+      }
+    }
+
+    async function lookup() {
+      const q = fName.value.trim();
+      pickedMeta = null;
+      pickSeq += 1;
+      const seq = pickSeq;
+      if (!q) { pickBox.style.display = 'none'; sync(); return; }
+      pickBox.style.display = '';
+      pickBox.innerHTML = '';
+      const head = el('div', 'pts-pick-h');
+      head.append(iconEl('search', 13), el('span', '', '正在 TMDB 识别「' + q + '」…'));
+      pickBox.append(head);
+      try {
+        const r = await call('GET', 'meta/search?name=' + encodeURIComponent(q)
+          + '&kind=' + encodeURIComponent(segKind.get()));
+        if (seq !== pickSeq) return;
+        const items = r.items || [];
+        if (!items.length) { renderPick([], r.message || 'TMDB 没找到同名作品'); return; }
+        // 默认选第一个（类型与当前选择一致的排在前面），不对可以点别的
+        pickedMeta = items[0];
+        renderPick(items, 'TMDB 找到 ' + items.length + ' 个作品，默认选第 1 个，认错就点别的');
+        sync();
+      } catch (e) {
+        if (seq === pickSeq) pickBox.style.display = 'none';
+      }
+    }
+
+    function lookupSoon() {
+      clearTimeout(pickTimer);
+      pickTimer = setTimeout(lookup, 650);
+    }
+    fName.addEventListener('input', lookupSoon);
+    // 编辑已有订阅时，把当前关联的条目直接摆出来
+    if (pickedMeta) renderPick([pickedMeta], '当前已关联 TMDB，改名字会重新识别');
     mainCol.append(sec1);
 
     // 站点选择（直接读取 MP）
@@ -906,6 +1013,10 @@ export function mountUI(root, api) {
       const parts = [];
       if (season) parts.push(`第 ${season} 部`);
       if (a || b) parts.push(`第 ${a ?? 1} ~ ${b ?? '∞'} 集`);
+      if (!parts.length && pickedMeta && pickedMeta.total_eps) {
+        parts.push(`共 ${pickedMeta.total_eps} 集`
+          + ((pickedMeta.season_count || 0) > 1 ? ` · ${pickedMeta.season_count} 季` : ''));
+      }
       sum.eps.textContent = parts.length ? parts.join(' · ') : '不限';
       sum.notify.textContent = tglNotify.get() ? '下到资源后推送到 MP 通知' : '不推送';
       sum.status.textContent = tglEnabled.get() ? '保存后立即启用' : '保存为停用';
@@ -952,6 +1063,8 @@ export function mountUI(root, api) {
         name: fName.value.trim(),
         kind: segKind.get(),
         season: segKind.get() === 'movie' ? null : numOrNull(fSeason),
+        // 点选过候选就按 TMDB ID 保存，后端不再按名字猜
+        tmdb_id: pickedMeta ? pickedMeta.tmdb_id : null,
         site_ids: picker.get(),
         include_words: '',
         exclude_words: '',
@@ -1066,7 +1179,12 @@ export function mountUI(root, api) {
       btns.push(b);
       node.append(b);
     }
-    return { node, get: () => cur };
+    const set = (v) => {
+      if (!options.some((o) => o.value === v)) return;
+      cur = v;
+      for (const x of btns) x.classList.toggle('on', x.dataset.v === cur);
+    };
+    return { node, get: () => cur, set };
   }
 
   function toggle(text, checked, onChange) {

@@ -57,14 +57,26 @@ def poster_url(path: str | None) -> str:
     return IMAGE_BASE + text
 
 
-def resolve(name: str, kind: str = "series", season: int | None = None) -> dict:
+def resolve(name: str, kind: str = "series", season: int | None = None,
+            tmdb_id: int | None = None) -> dict:
     """按剧名去 TMDB 找条目，返回海报/年份/总集数等元数据。
 
+    tmdb_id 有值时直接按 ID 取详情——用户在前端点选过同名候选，不能再按名字猜。
     在 MP 进程内才可用（依赖 app.modules.themoviedb）；单独跑单测时直接返回空。
     """
     title = str(name or "").strip()
-    if not title:
+    if not tmdb_id and not title:
         return {}
+    if tmdb_id:
+        try:
+            meta = _details(int(tmdb_id), kind, season)
+        except Exception as exc:
+            logger.warning(f"[PtSubscriber] TMDB 详情失败：{type(exc).__name__}: {str(exc)[:120]}")
+            return {}
+        if not meta:
+            return {}
+        meta["tmdb_id"] = int(tmdb_id)
+        return meta
     try:
         hit = _search(title, kind)
     except Exception as exc:  # 宿主没装 TMDB / 网络不通 / 接口变更
@@ -82,6 +94,58 @@ def resolve(name: str, kind: str = "series", season: int | None = None) -> dict:
         return {}
     meta["tmdb_id"] = int(tmdb_id)
     return meta
+
+
+def search(name: str, kind: str = "series", limit: int = 3) -> list[dict]:
+    """按名字列出同名候选（含年份、类型、季数、总集数），给前端点选用。
+
+    同名作品很容易认错（《天下第一》既有 2005 剧集也有 2021 电影），
+    所以把候选都摆出来，用户点哪个就用哪个的 TMDB ID。
+    """
+    title = str(name or "").strip()
+    if len(title) < 1:
+        return []
+    try:
+        from app.modules.themoviedb.tmdbapi import TmdbApi
+
+        api = TmdbApi()
+    except Exception as exc:
+        logger.warning(f"[PtSubscriber] TMDB 不可用：{type(exc).__name__}: {str(exc)[:120]}")
+        return []
+    try:
+        tv_rows = api.search_tvs(title, "") or []
+    except Exception:
+        tv_rows = []
+    try:
+        movie_rows = api.search_movies(title, "") or []
+    except Exception:
+        movie_rows = []
+    order = (("tv", tv_rows), ("movie", movie_rows))
+    if str(kind) == "movie":
+        order = (("movie", movie_rows), ("tv", tv_rows))
+    out: list[dict] = []
+    for mtype, rows in order:
+        for row in list(rows)[:limit]:
+            tid = row.get("id")
+            if not tid or any(x["tmdb_id"] == int(tid) for x in out):
+                continue
+            try:
+                detail = _tv_details(int(tid), None) if mtype == "tv" else _movie_details(int(tid))
+            except Exception:
+                continue
+            seasons = detail.get("seasons") or []
+            out.append({
+                "tmdb_id": int(tid),
+                "kind": "series" if mtype == "tv" else "movie",
+                "meta_title": detail.get("meta_title") or "",
+                "year": detail.get("year") or "",
+                "poster_path": detail.get("poster_path") or "",
+                "poster_url": poster_url(detail.get("poster_path")),
+                "total_eps": int(detail.get("total_eps") or 0),
+                "season_count": len(seasons),
+                "seasons": seasons,
+            })
+    return out
 
 
 def _search(title: str, kind: str) -> dict:

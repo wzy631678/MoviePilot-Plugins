@@ -21,6 +21,7 @@ except ImportError:  # 兼容旧版宿主
 from .core import Store, filter_candidates
 from .meta import poster_url as meta_poster_url
 from .meta import resolve as resolve_meta
+from .meta import search as search_meta
 from .models import next_episode, resolution_of, search_keyword
 from .mp_adapter import MPBridge
 from .rules import RULE_OPTIONS, parse_rules
@@ -66,7 +67,7 @@ def build_trigger(sub: dict, tz: str):
 class PtSubscriber(_PluginBase):
     plugin_name = "定时订阅下载"
     plugin_desc = "自己选周几几点，到指定站点搜资源并按详细规则下载到指定容器；自动对接 TMDB 显示海报与总集数。"
-    plugin_version = "1.1.0"
+    plugin_version = "1.1.1"
     plugin_author = "wzy"
     plugin_config_prefix = "ptsubscriber_"
     plugin_order = 90
@@ -158,6 +159,7 @@ class PtSubscriber(_PluginBase):
             {"path": "/logs", "endpoint": self.api_logs, "methods": ["GET"], "summary": "运行日志与命中"},
             {"path": "/probe", "endpoint": self.api_probe, "methods": ["GET"], "summary": "自检"},
             {"path": "/meta/refresh", "endpoint": self.api_meta_refresh, "methods": ["POST"], "summary": "同步海报与总集数"},
+            {"path": "/meta/search", "endpoint": self.api_meta_search, "methods": ["GET"], "summary": "按名字查 TMDB 候选"},
             {"path": "/notify/test", "endpoint": self.api_notify_test, "methods": ["POST"], "summary": "发送测试通知"},
             {"path": "/downloaders/test", "endpoint": self.api_downloader_test, "methods": ["GET"], "summary": "测试下载器连接"},
             {"path": "/sub", "endpoint": self.api_sub_save, "methods": ["POST"], "summary": "新增或修改订阅"},
@@ -457,11 +459,14 @@ class PtSubscriber(_PluginBase):
                 or old.get("season") != sub.get("season")
                 or str(old.get("kind") or "") != str(sub.get("kind") or "series"))
 
-    def _fill_meta(self, sub: dict) -> dict:
-        """查海报/年份/总集数；查不到就原样返回，不影响订阅本身。"""
+    def _fill_meta(self, sub: dict, tmdb_id: int | None = None) -> dict:
+        """查海报/年份/总集数；查不到就原样返回，不影响订阅本身。
+
+        前端点选过候选时会带上 tmdb_id，按 ID 取详情，不再按名字猜。
+        """
         try:
             meta = resolve_meta(sub.get("name") or "", sub.get("kind") or "series",
-                                sub.get("season"))
+                                sub.get("season"), tmdb_id)
         except Exception as exc:
             logger.warning(f"[{self.plugin_name}] TMDB 元数据失败：{type(exc).__name__}: {exc}")
             return sub
@@ -547,6 +552,12 @@ class PtSubscriber(_PluginBase):
         out["sub_count"] = len(self.store.subs())
         return out
 
+    def api_meta_search(self, name: str = "", kind: str = "series") -> dict:
+        """新建订阅时实时查 TMDB：列出同名作品的年份/类型/集数，供用户挑选。"""
+        items = search_meta(name, kind or "series")
+        return {"ok": True, "items": items,
+                "message": "" if items else "TMDB 没找到同名作品，可以直接保存，之后在卡片上点「同步海报」再试"}
+
     def api_meta_refresh(self, payload: dict = Body(default={})) -> dict:
         """给所有订阅补/刷新 TMDB 海报与总集数；force=True 时连已有的也重查。"""
         force = bool((payload or {}).get("force"))
@@ -568,10 +579,15 @@ class PtSubscriber(_PluginBase):
 
     def api_sub_save(self, payload: dict = Body(default={})) -> dict:
         try:
-            old = self.store.get_sub(str((payload or {}).get("id") or ""))
-            sub = self.store.upsert_sub(payload or {})
-            # 新建或改了名字/季数时顺手查一次 TMDB，卡片立刻就有海报和总集数
-            if self._meta_stale(sub, old):
+            payload = payload or {}
+            wanted_id = payload.get("tmdb_id")
+            old = self.store.get_sub(str(payload.get("id") or ""))
+            sub = self.store.upsert_sub(payload)
+            if wanted_id:
+                # 用户点选过候选：按 TMDB ID 取，避免同名再认错
+                sub = self._fill_meta(sub, int(wanted_id))
+            elif self._meta_stale(sub, old):
+                # 新建或改了名字/季数时顺手查一次，卡片立刻就有海报和总集数
                 sub = self._fill_meta(sub)
             self._rebuild_jobs()
             item = {**sub, "rules_summary": parse_rules(sub.get("rules")).summary()}
