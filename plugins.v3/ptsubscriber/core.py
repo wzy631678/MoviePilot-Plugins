@@ -9,6 +9,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from .meta import META_KEYS, poster_url
 from .models import (
     SubscriptionIn,
     episode_progress,
@@ -73,6 +74,10 @@ class Store:
             data["created_at"] = old.get("created_at") or now
             data["updated_at"] = now
             data["next_run_at"] = old.get("next_run_at") or ""
+            # 海报/总集数这些是 TMDB 查回来的，编辑表单里没有，编辑时原样沿用
+            for key in META_KEYS:
+                if key in old:
+                    data[key] = old[key]
             items[items.index(old)] = data
             self.save_subs(items)
             return data
@@ -83,6 +88,22 @@ class Store:
         items.append(data)
         self.save_subs(items)
         return data
+
+    def set_meta(self, sid: str, meta: dict) -> dict | None:
+        """把 TMDB 查到的海报/年份/总集数写进订阅；查不到就不写。"""
+        if not meta:
+            return self.get_sub(sid)
+        items = self.subs()
+        for item in items:
+            if item.get("id") != sid:
+                continue
+            for key in META_KEYS:
+                if key in meta:
+                    item[key] = meta[key]
+            item["meta_at"] = _now()
+            self.save_subs(items)
+            return item
+        return None
 
     def mark_delivered(self, sid: str, episodes: list[int]) -> dict | None:
         """把成功提交的集数记进台账，下次补搜自动跳到下一集。"""
@@ -156,8 +177,18 @@ class Store:
         items.insert(0, {**entry, "at": _now()})
         self.backend.save("logs", items[: self.log_limit])
 
+    def last_runs(self) -> dict[str, dict]:
+        """每条订阅最近一次运行记录（日志本身已按时间倒序）。"""
+        out: dict[str, dict] = {}
+        for entry in self.logs():
+            sid = entry.get("sub_id")
+            if sid and sid not in out:
+                out[str(sid)] = entry
+        return out
+
     def public_subs(self) -> list[dict]:
         out: list[dict] = []
+        runs = self.last_runs()
         for sub in self.subs():
             sub = dict(sub)
             sub["schedule_label"] = schedule_label(sub)
@@ -165,6 +196,14 @@ class Store:
             sub["ep_progress"] = episode_progress(sub)
             sub["next_episode"] = next_episode(sub)
             sub["search_keyword"] = search_keyword(sub)
+            # 卡片上的「166/200」：已提交集数 / TMDB 总集数（查不到就退回订阅里填的结束集）
+            done = {int(x) for x in (sub.get("delivered_eps") or [])}
+            sub["done_eps"] = len(done)
+            sub["total_eps"] = int(sub.get("total_eps") or 0) or int(sub.get("ep_end") or 0)
+            sub["poster_url"] = poster_url(sub.get("poster_path"))
+            last = runs.get(str(sub.get("id") or "")) or {}
+            sub["last_run_at"] = last.get("at") or ""
+            sub["last_status"] = last.get("status") or ""
             out.append(sub)
         return out
 

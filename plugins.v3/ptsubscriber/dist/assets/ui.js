@@ -41,18 +41,37 @@ const CSS = `
 .pts-empty h3{margin:0;font-size:16.5px;font-weight:700}
 .pts-empty p{margin:0;font-size:12.8px;color:var(--muted);max-width:430px;line-height:1.65}
 .pts-empty .pts-btn{margin-top:10px}
-.pts-tasks{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px}
-.pts-task{border:1px solid var(--line);border-radius:16px;background:var(--sur);padding:15px 16px;display:flex;flex-direction:column;gap:11px;transition:.18s}
-.pts-task:hover{border-color:rgba(139,92,246,.45);box-shadow:0 10px 26px rgba(17,24,39,.09);transform:translateY(-1px)}
-.pts-task-top{display:flex;gap:10px;align-items:flex-start}
-.pts-task-name{flex:1;min-width:0;font-size:15px;font-weight:700;word-break:break-all;line-height:1.4}
-.pts-run{flex:none;border:1px solid rgba(139,92,246,.45);background:var(--soft);color:var(--acc);border-radius:9px;padding:4px 10px;font-size:12px;font-weight:650;cursor:pointer;font-family:inherit;display:inline-flex;align-items:center;gap:4px;white-space:nowrap;transition:.15s;margin-top:1px}
-.pts-run:hover{background:linear-gradient(135deg,var(--acc),var(--acc2));color:#fff;border-color:transparent}
-.pts-run:disabled{opacity:.55;cursor:not-allowed}
-.pts-task-line{display:flex;gap:7px;align-items:flex-start;font-size:12.6px;color:var(--muted)}
-.pts-task-line .pts-ico{flex:none;margin-top:2px;opacity:.75}
-.pts-task-line>div{flex:1 1 auto;min-width:0;word-break:break-word}
-.pts-task-line b{color:var(--on);font-weight:600}
+.pts-tasks{display:grid;grid-template-columns:repeat(auto-fill,minmax(322px,1fr));gap:12px}
+.pts-pcard{position:relative;border:1px solid var(--line);border-radius:15px;overflow:hidden;background:var(--sur);cursor:pointer;transition:.18s}
+.pts-pcard:hover{border-color:rgba(139,92,246,.5);box-shadow:0 12px 28px rgba(17,24,39,.13);transform:translateY(-1px)}
+.pts-pcard.off{opacity:.62}
+.pts-pcard .bg{position:absolute;inset:-22%;background-size:cover;background-position:center;filter:blur(15px) saturate(1.25);opacity:.3;pointer-events:none}
+.pts-dark .pts-pcard .bg{opacity:.36}
+.pts-pcard .veil{position:absolute;inset:0;pointer-events:none;background:linear-gradient(90deg,rgba(255,255,255,.97) 6%,rgba(255,255,255,.9) 44%,rgba(255,255,255,.6));}
+.pts-dark .pts-pcard .veil{background:linear-gradient(90deg,rgba(27,30,38,.97) 6%,rgba(27,30,38,.9) 44%,rgba(27,30,38,.62))}
+.pts-pcard .in{position:relative;display:flex;gap:11px;padding:12px 12px 11px}
+.pts-poster{width:58px;height:84px;border-radius:9px;object-fit:cover;flex:none;background:var(--sur2);box-shadow:0 5px 14px rgba(0,0,0,.22)}
+.pts-poster.ph{display:grid;place-items:center;color:rgba(255,255,255,.92);font-weight:800;font-size:17px;background:linear-gradient(135deg,rgba(139,92,246,.85),rgba(167,139,250,.85));box-shadow:none;text-shadow:0 1px 3px rgba(0,0,0,.2)}
+.pts-pbody{flex:1;min-width:0;display:flex;flex-direction:column;gap:5px}
+.pts-ptop{display:flex;align-items:flex-start;gap:7px;min-width:0}
+.pts-ptitle{display:flex;align-items:flex-start;gap:6px;flex:1;min-width:0}
+.pts-ptitle .pts-pname{flex:0 1 auto}
+.pts-pbar{position:absolute;left:0;right:0;bottom:0;height:2.5px;background:rgba(139,92,246,.13)}
+.pts-pbar>span{display:block;height:100%;background:linear-gradient(90deg,var(--acc),var(--acc2))}
+.pts-year{font-size:11px;color:var(--muted);font-weight:650;flex:none;padding-top:2px;font-variant-numeric:tabular-nums}
+.pts-pname{flex:1;min-width:0;font-size:14.6px;font-weight:720;line-height:1.32;word-break:break-word;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.pts-sbadge{font-size:10.5px;font-weight:750;color:var(--acc);background:var(--soft);border-radius:6px;padding:1px 6px;flex:none;margin-top:1px;letter-spacing:.3px}
+.pts-pfoot{display:flex;align-items:center;gap:8px;margin-top:auto;font-size:11.6px;color:var(--muted);padding-top:3px}
+.pts-prog{display:inline-flex;align-items:center;gap:4px;font-weight:700;color:var(--on);font-variant-numeric:tabular-nums}
+.pts-prog .pts-ico{opacity:.7}
+.pts-pfoot .sp{flex:1}
+.pts-kebab{width:25px;height:25px;border-radius:7px;border:0;background:transparent;color:var(--muted);cursor:pointer;display:grid;place-items:center;flex:none;padding:0}
+.pts-kebab:hover{background:var(--soft);color:var(--acc)}
+.pts-menu{position:absolute;right:9px;bottom:40px;z-index:30;background:var(--sur);border:1px solid var(--line);border-radius:11px;box-shadow:0 16px 36px rgba(0,0,0,.22);padding:5px;min-width:136px;display:flex;flex-direction:column;gap:1px}
+.pts-menu button{border:0;background:transparent;color:var(--on);text-align:left;padding:7px 9px;border-radius:7px;font-size:12.6px;cursor:pointer;font-family:inherit;display:flex;align-items:center;gap:8px;white-space:nowrap}
+.pts-menu button:hover{background:var(--soft);color:var(--acc)}
+.pts-menu button.danger{color:var(--danger)}
+.pts-menu button.danger:hover{background:rgba(220,38,38,.12);color:var(--danger)}
 .pts-chips{display:flex;flex-wrap:wrap;gap:6px;flex:1 1 auto;min-width:0}
 .pts-chip{border:1px solid var(--line);background:var(--sur);color:var(--on);border-radius:999px;padding:6px 13px;font-size:12.5px;cursor:pointer;transition:.15s;font-family:inherit;font-weight:500}
 .pts-chip:hover{border-color:rgba(139,92,246,.55)}
@@ -458,7 +477,23 @@ export function mountUI(root, api) {
     const bar = el('div', 'pts-bar');
     const add = button('新建任务', () => openForm(null), 'primary');
     add.prepend(iconEl('plus', 15));
-    bar.append(add, el('span', 'pts-muted',
+    const syncMeta = button('同步海报', async () => {
+      syncMeta.disabled = true;
+      const old = syncMeta.textContent;
+      syncMeta.textContent = '查询中…';
+      try {
+        const r = await call('POST', 'meta/refresh', { force: false });
+        await reloadSubs();
+        if (r.message) alert(r.message);
+      } catch (e) {
+        alert('同步失败：' + String(e && e.message ? e.message : e));
+      } finally {
+        syncMeta.disabled = false;
+        syncMeta.textContent = old;
+      }
+    }, '');
+    syncMeta.title = '按剧名到 TMDB 查海报、年份和总集数；已有海报的会跳过';
+    bar.append(add, syncMeta, el('span', 'pts-muted',
       `${state.subs.length} 个任务 · 站点 ${probe.site_count ?? (state.options.sites || []).length} 个`
       + ` · 下载器 ${(state.options.downloaders || []).length} 个`
       + ` · 调度器${probe.scheduler_running ? '运行中' : '未运行'}`));
@@ -469,108 +504,160 @@ export function mountUI(root, api) {
     p.append(grid);
   }
 
+  function posterFallback(sub) {
+    const box = el('div', 'pts-poster ph', String(sub.name || '?').trim().slice(0, 1));
+    return box;
+  }
+
+  function posterNode(sub) {
+    if (!sub.poster_url) return posterFallback(sub);
+    const img = el('img', 'pts-poster');
+    img.src = sub.poster_url;
+    img.alt = '';
+    img.loading = 'lazy';
+    img.referrerPolicy = 'no-referrer';
+    // 图片被墙/失效时不至于半边空白，退回首字占位
+    img.addEventListener('error', () => img.replaceWith(posterFallback(sub)));
+    return img;
+  }
+
+  function ago(text) {
+    const raw = String(text || '').trim();
+    if (!raw) return '未执行';
+    const t = Date.parse(raw.replace(' ', 'T'));
+    if (!isFinite(t)) return raw.slice(5, 16);
+    const diff = Math.max(0, Date.now() - t) / 1000;
+    if (diff < 90) return '刚刚';
+    if (diff < 3600) return Math.floor(diff / 60) + ' 分钟前';
+    if (diff < 86400) return Math.floor(diff / 3600) + ' 小时前';
+    if (diff < 86400 * 30) return Math.floor(diff / 86400) + ' 天前';
+    return raw.slice(0, 10);
+  }
+
+  async function runSub(sub) {
+    try {
+      const r = await call('POST', 'sub/run', { id: sub.id });
+      await reloadAll();
+      const last = r.last || {};
+      alert(r.ok
+        ? (last.message || '已执行完成') + (last.target ? '\n本轮目标：' + last.target : '')
+        : '执行失败：' + (r.message || '未知错误'));
+    } catch (e) {
+      alert('执行失败：' + String(e && e.message ? e.message : e));
+    }
+  }
+
+  async function toggleSub(sub) {
+    await call('POST', 'sub/toggle', { id: sub.id, enabled: !sub.enabled });
+    await reloadSubs();
+  }
+
+  async function resetSub(sub) {
+    if (!confirm('清空「' + sub.name + '」的补搜进度？之后会从起始集重新补。')) return;
+    const r = await call('POST', 'sub/reset', { id: sub.id });
+    if (!r.ok) alert(r.message || '操作失败');
+    await reloadSubs();
+  }
+
+  async function deleteSub(sub) {
+    if (!confirm('确定删除订阅「' + sub.name + '」？')) return;
+    await call('POST', 'sub/delete', { id: sub.id });
+    await reloadSubs();
+  }
+
+  function kebabMenu(sub, card) {
+    const btn = el('button', 'pts-kebab');
+    btn.type = 'button';
+    btn.title = '更多操作';
+    btn.innerHTML = '<svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor">'
+      + '<circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/>'
+      + '<circle cx="12" cy="19" r="1.8"/></svg>';
+    let menu = null;
+    const close = () => { if (menu) { menu.remove(); menu = null; } };
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      if (menu) { close(); return; }
+      menu = el('div', 'pts-menu');
+      const item = (label, icon, fn, cls) => {
+        const b = el('button', cls || '');
+        b.type = 'button';
+        b.append(iconEl(icon, 14), el('span', '', label));
+        b.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          close();
+          await fn();
+        });
+        menu.append(b);
+      };
+      item('立即执行', 'play', () => runSub(sub));
+      item('编辑任务', 'edit', () => openForm(sub));
+      if (sub.kind !== 'movie') item('清空进度', 'rewind', () => resetSub(sub));
+      item(sub.enabled ? '停用任务' : '启用任务', 'refresh', () => toggleSub(sub));
+      item('删除任务', 'trash', () => deleteSub(sub), 'danger');
+      card.append(menu);
+      setTimeout(() => {
+        const away = (e) => {
+          if (menu && !menu.contains(e.target) && e.target !== btn) {
+            close();
+            document.removeEventListener('click', away);
+          }
+        };
+        document.addEventListener('click', away);
+      }, 30);
+    });
+    return btn;
+  }
+
   function taskCard(sub) {
-    const card = el('div', 'pts-task');
-    const top = el('div', 'pts-task-top');
-    top.append(el('div', 'pts-task-name', sub.name));
-    top.append(el('span', 'pts-pill off', sub.kind === 'movie' ? '电影' : '剧集'));
+    const card = el('div', 'pts-pcard' + (sub.enabled ? '' : ' off'));
+    const bg = el('div', 'bg');
+    if (sub.poster_url) bg.style.backgroundImage = 'url("' + sub.poster_url + '")';
+    card.append(bg, el('div', 'veil'));
 
-    // 顶部「立即执行」：不等计划时间，现在就按规则搜一轮（追更第一集、临时补一集都用它）
-    const runNow = button('', async () => {
-      runNow.disabled = true;
-      const label = runNow.querySelector('span');
-      const old = label.textContent;
-      label.textContent = '执行中…';
-      try {
-        const r = await call('POST', 'sub/run', { id: sub.id });
-        await reloadAll();
-        const last = r.last || {};
-        alert(r.ok
-          ? (last.message || '已执行完成') + (last.target ? '\n本轮目标：' + last.target : '')
-          : '执行失败：' + (r.message || '未知错误'));
-      } catch (e) {
-        alert('执行失败：' + String(e && e.message ? e.message : e));
-      } finally {
-        runNow.disabled = false;
-        label.textContent = old;
-      }
-    }, 'pts-run');
-    runNow.title = '不等计划时间，现在就去勾选的站点搜一轮';
-    runNow.append(iconEl('play', 13), el('span', '', '立即执行'));
+    const inner = el('div', 'in');
+    inner.append(posterNode(sub));
 
-    const sw = el('button', 'pts-switch' + (sub.enabled ? ' on' : ''));
-    sw.type = 'button';
-    sw.title = sub.enabled ? '点击停用' : '点击启用';
-    sw.append(el('span'));
-    sw.addEventListener('click', async () => {
-      sw.disabled = true;
-      try {
-        await call('POST', 'sub/toggle', { id: sub.id, enabled: !sub.enabled });
-        await reloadSubs();
-      } finally { sw.disabled = false; }
-    });
-    top.append(runNow, sw);
-    card.append(top);
+    const bodyEl = el('div', 'pts-pbody');
+    const top = el('div', 'pts-ptop');
+    if (sub.year) top.append(el('span', 'pts-year', sub.year));
+    const tit = el('div', 'pts-ptitle');
+    tit.append(el('div', 'pts-pname', sub.name));
+    if (sub.kind !== 'movie' && sub.season) {
+      tit.append(el('span', 'pts-sbadge', 'S' + String(sub.season).padStart(2, '0')));
+    }
+    top.append(tit);
+    bodyEl.append(top);
 
-    const line1 = el('div', 'pts-task-line');
-    line1.append(iconEl('clock', 14));
-    const sch = el('div', '');
-    sch.append(el('b', '', sub.schedule_label || scheduleText(sub.schedule_mode, sub.schedule_time,
-      sub.schedule_weekday, sub.schedule_interval)));
-    if (sub.next_run_at) sch.append(el('div', 'pts-muted', '下次执行 ' + sub.next_run_at));
-    line1.append(sch);
-    card.append(line1);
+    const foot = el('div', 'pts-pfoot');
+    const prog = el('span', 'pts-prog');
+    prog.append(iconEl('download', 13));
+    const done = Number(sub.done_eps || 0);
+    const total = Number(sub.total_eps || 0);
+    if (sub.kind === 'movie') {
+      prog.append(el('b', '', done ? '已下载' : '电影'));
+    } else if (total) {
+      prog.append(el('b', '', done + '/' + total));
+      prog.title = '补搜进度 ' + Math.min(100, Math.round((done / total) * 100)) + '%';
+    } else {
+      prog.append(el('b', '', done ? done + ' 集' : '待补搜'));
+    }
+    foot.append(prog, el('span', 'sp'));
+    const when = el('span', '', ago(sub.last_run_at));
+    if (sub.next_run_at) when.title = '下次执行 ' + sub.next_run_at;
+    foot.append(when, kebabMenu(sub, card));
+    bodyEl.append(foot);
 
-    const lineSite = el('div', 'pts-task-line');
-    lineSite.append(iconEl('server', 14));
-    const domains = sub.site_ids || [];
-    const chips = el('div', 'pts-chips');
-    domains.slice(0, 3).forEach((d) => {
-      const name = ((state.options.sites || []).find((s) => s.domain === d) || {}).name || d;
-      chips.append(el('span', 'pts-pill tiny', name));
-    });
-    if (domains.length > 3) chips.append(el('span', 'pts-pill tiny off', '+' + (domains.length - 3)));
-    if (!domains.length) chips.append(el('span', 'pts-pill tiny off', '未选站点'));
-    lineSite.append(chips);
-    card.append(lineSite);
-
-    const lineRule = el('div', 'pts-task-line');
-    lineRule.append(iconEl('filter', 14));
-    lineRule.append(el('div', '', sub.rules_summary || '不限资源'));
-    card.append(lineRule);
-
-    const lineDl = el('div', 'pts-task-line');
-    lineDl.append(iconEl('download', 14));
-    lineDl.append(el('div', '', '下载到 ' + (sub.downloader_id || 'MP 默认下载器')
-      + (sub.save_path ? ' · ' + sub.save_path : '')));
-    card.append(lineDl);
-
-    const lineEp = el('div', 'pts-task-line');
-    lineEp.append(iconEl('film', 14));
-    lineEp.append(el('div', '', sub.ep_progress || (sub.kind === 'movie' ? '电影' : '待补搜')));
-    card.append(lineEp);
-
-    const foot = el('div', 'pts-task-foot');
-    foot.append(el('span', 'pts-pill ' + (sub.enabled ? 'ok' : 'off'), sub.enabled ? '已启用' : '已停用'));
-    foot.append(el('span', 'sp'));
-    const edit = button('', () => openForm(sub), 'ghost');
-    edit.append(iconEl('edit', 15));
-    const del = button('', async () => {
-      if (!confirm('确定删除订阅「' + sub.name + '」？')) return;
-      await call('POST', 'sub/delete', { id: sub.id });
-      await reloadSubs();
-    }, 'ghost danger');
-    del.append(iconEl('trash', 15));
-    const reset = button('', async () => {
-      if (!confirm('清空「' + sub.name + '」的补搜进度？之后会从起始集重新补。')) return;
-      const r = await call('POST', 'sub/reset', { id: sub.id });
-      if (!r.ok) alert(r.message || '操作失败');
-      await reloadSubs();
-    }, 'ghost');
-    reset.title = '清空已下载集数台账';
-    reset.append(iconEl('rewind', 15));
-    foot.append(reset, edit, del);
-    card.append(foot);
+    inner.append(bodyEl);
+    card.append(inner);
+    // 底部细进度条：一眼看出补到哪儿了
+    if (sub.kind !== 'movie' && total > 0) {
+      const bar = el('div', 'pts-pbar');
+      const fill = el('span');
+      fill.style.width = Math.min(100, Math.round((done / total) * 100)) + '%';
+      bar.append(fill);
+      card.append(bar);
+    }
+    card.addEventListener('click', () => openForm(sub));
     return card;
   }
 
@@ -600,7 +687,7 @@ export function mountUI(root, api) {
     const aside = el('div', 'pts-summary');
     body.append(mainCol, aside);
 
-    const err = el('div', 'pts-err on');
+    const err = el('div', 'pts-err');
     mainCol.append(err);
 
     const opts = state.options.rule_options || {};
@@ -611,17 +698,32 @@ export function mountUI(root, api) {
     const h1 = el('div', 'pts-sec-h');
     h1.append(el('h4', '', '订阅填写'), el('span', 'pts-req', '必填'));
     sec1.append(h1, el('div', 'pts-sec-desc',
-      '订阅名称就是站点搜索关键词，填剧名即可；分多部的剧再填「第几部」。填了集数就一集一集补，不填就一次收下命中的资源'));
+      '订阅名称就是站点搜索关键词，填剧名即可；类型选剧集会自动到 TMDB 取海报和总集数。填了集数就一集一集补，不填就一次收下命中的资源'));
+    const segKind = segmented([{ value: 'series', label: '剧集' }, { value: 'movie', label: '电影' }],
+      (sub && sub.kind) || 'series', () => { applyKind(); sync(); });
+    const kindRow = el('div', 'pts-f');
+    kindRow.style.marginBottom = '12px';
+    kindRow.append(el('span', '', '类型'), segKind.node);
+    sec1.append(kindRow);
+
     const g1 = el('div', 'pts-grid2');
     const fName = textInput(sub ? sub.name : '', 'text', '例如：庆余年');
     const fSeason = textInput(sub && sub.season ? sub.season : '', 'number', '不分部留空');
-    g1.append(field('订阅名称', fName), field('第几部（季）', fSeason));
+    const seasonField = field('第几部（季）', fSeason);
+    g1.append(field('订阅名称', fName), seasonField);
     const fEpStart = textInput(sub && sub.ep_start ? sub.ep_start : '', 'number', '例如 1');
     const fEpEnd = textInput(sub && sub.ep_end ? sub.ep_end : '', 'number', '例如 40');
     const g1b = el('div', 'pts-grid2');
     g1b.style.marginTop = '12px';
     g1b.append(field('订阅集数 · 从', fEpStart), field('到', fEpEnd));
     sec1.append(g1, g1b);
+    // 电影没有季/集概念，选了电影就把这两行收起来
+    function applyKind() {
+      const movie = segKind.get() === 'movie';
+      seasonField.style.display = movie ? 'none' : '';
+      g1b.style.display = movie ? 'none' : '';
+    }
+    applyKind();
     mainCol.append(sec1);
 
     // 站点选择（直接读取 MP）
@@ -848,9 +950,8 @@ export function mountUI(root, api) {
       const payload = {
         id: sub ? sub.id : '',
         name: fName.value.trim(),
-        // 不再让用户选「剧集/电影」：填了季度或集数就按剧集补，否则当作单片收一次
-        kind: (numOrNull(fSeason) || numOrNull(fEpStart) || numOrNull(fEpEnd)) ? 'series' : 'movie',
-        season: numOrNull(fSeason),
+        kind: segKind.get(),
+        season: segKind.get() === 'movie' ? null : numOrNull(fSeason),
         site_ids: picker.get(),
         include_words: '',
         exclude_words: '',
