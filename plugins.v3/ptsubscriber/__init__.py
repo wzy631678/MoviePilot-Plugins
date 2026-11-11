@@ -93,7 +93,7 @@ def build_trigger(sub: dict, tz: str):
 class PtSubscriber(_PluginBase):
     plugin_name = "定时订阅下载"
     plugin_desc = "自己选周几几点，到指定站点搜资源并按详细规则下载到指定容器；自动对接 TMDB，搜到的资源会按片名、年份、剧集/电影、集数逐项比对，只把真正这部排在最前。支持智能助手和 QQ 等远程入口：/ptsub 片名 建订阅（可带 从N集 / 站点X / 每天3:00 / 立即），/ptfind 片名 只找资源直接下，/ptlist 看订阅进度；回复全是纯文本不带图，QQ 里回个序号就行。"
-    plugin_version = "1.4.1"
+    plugin_version = "1.4.2"
     plugin_author = "wzy"
     plugin_config_prefix = "ptsubscriber_"
     plugin_order = 90
