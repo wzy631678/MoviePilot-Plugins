@@ -118,19 +118,29 @@ def resolve(name: str, kind: str = "series", season: int | None = None,
 
 
 def _norm_title(text: str) -> str:
-    """去掉空格与常见分隔符，只比「片名骨架」。"""
+    """去掉空格与常见分隔符，只比「片名骨架」。
+
+    先剥掉括号括起来的年份尾巴（(2005) / （2005）），让「天下第一(2005)」
+    等同「天下第一」（完全同名，排最前）；「天下第一 · 2005」这种不带括号的
+    保留年份，按前缀匹配处理。
+    """
     import re
 
-    return re.sub(r"[\s··\-_.()\[\]{}【】（）:：]+", "", str(text or "")).lower()
+    s = str(text or "")
+    s = re.sub(r"[\(（](?:19|20)\d{2}[\)）]", "", s)
+    return re.sub(r"[\s··\-_.()\[\]{}【】（）:：]+", "", s).lower()
 
 
 def _match_rank(title: str, query: str) -> int:
-    """候选相对用户输入的相关度：0 完全同名 → 1 前缀 → 2 含同名 → 3 无关。
+    """候选相对用户输入的相关度：0 完全同名 → 1 同名加年份/季版后缀 → 2 含同名（另一部）→ 3 无关。
 
     《天下第一》这种输入，TMDB 常把「天下第一良配」排在前面，导致默认选中
     错的作品、再按它去站点搜就串了。按「骨架完全相等优先」重排，让正剧《天下第一》
-    排第一，同名短剧退到后面。
+    排第一；「天下第一 2025」这类同剧不同年份的算前缀级；「天下第一良配」这种
+    后面还接着别字的算另一部作品，退到后面。
     """
+    import re
+
     t = _norm_title(title)
     q = _norm_title(query)
     if not t or not q:
@@ -138,7 +148,11 @@ def _match_rank(title: str, query: str) -> int:
     if t == q:
         return 0
     if t.startswith(q):
-        return 1
+        rest = t[len(q):]
+        # 后面只跟年份/季/部/集数这类后缀 → 同名不同版（天下第一 2025）；跟了别的字 → 另一部
+        if rest and re.fullmatch(r"(?:19|20)\d{2}|s\d{1,2}|第[0-9一二三四五六七八九十]{1,3}[季部]?", rest):
+            return 1
+        return 2
     if q in t:
         return 2
     return 3
