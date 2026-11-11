@@ -92,7 +92,7 @@ def build_trigger(sub: dict, tz: str):
 class PtSubscriber(_PluginBase):
     plugin_name = "定时订阅下载"
     plugin_desc = "自己选周几几点，到指定站点搜资源并按详细规则下载到指定容器；自动对接 TMDB，搜到的资源会按片名、年份、剧集/电影、集数逐项比对，只把真正这部排在最前。支持智能助手和 QQ 等远程入口：说「订阅片名」或发 /ptsub 片名，直接穿透到插件建订阅，不走 MP 自带订阅。"
-    plugin_version = "1.3.0"
+    plugin_version = "1.3.1"
     plugin_author = "wzy"
     plugin_config_prefix = "ptsubscriber_"
     plugin_order = 90
@@ -178,7 +178,8 @@ class PtSubscriber(_PluginBase):
     def get_page(self) -> Optional[List[dict]]:
         return None
 
-    def get_command(self) -> List[Dict[str, Any]]:
+    @staticmethod
+    def get_command() -> List[Dict[str, Any]]:
         """注册远程命令：QQ / 微信 / TG 里发 /ptsub 片名 即可建订阅（穿透到插件）。"""
         try:
             event_type = EventType.PluginAction
@@ -195,8 +196,9 @@ class PtSubscriber(_PluginBase):
     def get_agent_tools(self) -> List[Any]:
         """注册智能助手工具：说「订阅片名」即可建订阅，不经 MP 自带订阅。"""
         try:
-            return [remote.PtSubSubscribeTool]
-        except Exception:
+            return remote.build_agent_tools()
+        except Exception as err:  # noqa: BLE001 - 智能助手不可用不影响插件其它功能
+            logger.debug(f"{self.plugin_name}：智能助手工具不可用：{err}")
             return []
 
     @_register(_PLUGIN_ACTION_EVENT)
