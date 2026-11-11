@@ -1,4 +1,5 @@
 /* PtSubscriber 插件页面：原生 DOM，无构建工具，宿主注入的 api 负责鉴权。 */
+const UI_VERSION = '1.2.0';
 const CSS = `
 .pts-root,.pts-ov{--acc:#8b5cf6;--acc2:#a78bfa;--sur:#ffffff;--sur2:#f7f7fb;--sur3:#eeeef6;--on:#1f2230;--muted:rgba(31,34,48,.58);--line:rgba(17,24,39,.1);--soft:rgba(139,92,246,.12);--danger:#dc2626;--ok:#16a34a;--warn:#b45309}
 .pts-dark{--sur:#1b1e26;--sur2:#232733;--sur3:#2b3040;--on:#e9ebf2;--muted:rgba(233,235,242,.6);--line:rgba(255,255,255,.12);--soft:rgba(139,92,246,.22);--danger:#f87171;--ok:#4ade80;--warn:#fbbf24}
@@ -8,6 +9,7 @@ const CSS = `
 .pts-ov.pts-dark{color-scheme:dark}
 .pts-root *,.pts-ov *{box-sizing:border-box}
 .pts-head{display:flex;align-items:flex-start;gap:12px;padding:2px 2px 16px}
+.pts-ver{display:inline-block;margin-top:5px;font-size:10.6px;font-weight:700;letter-spacing:.4px;color:var(--muted);background:var(--sur2);border:1px solid var(--line);border-radius:6px;padding:0 5px}
 .pts-logo{width:38px;height:38px;border-radius:12px;display:grid;place-items:center;flex:none;color:#fff;background:linear-gradient(135deg,var(--acc),var(--acc2));box-shadow:0 6px 18px rgba(139,92,246,.35)}
 .pts-head-mid{flex:1;min-width:0}
 .pts-head-mid h2{margin:0;font-size:17px;font-weight:750;letter-spacing:.2px}
@@ -33,6 +35,9 @@ const CSS = `
 .pts-btn.ghost:hover{background:var(--soft)}
 .pts-pill{font-size:11.5px;padding:2px 9px;border-radius:999px;background:var(--soft);color:var(--acc);font-weight:650;white-space:nowrap}
 .pts-pill.ok{background:rgba(34,197,94,.15);color:var(--ok)}
+.pts-pill.anim{background:rgba(14,165,233,.16);color:#0284c7}
+.pts-dark .pts-pill.anim{background:rgba(56,189,248,.24);color:#7dd3fc}
+.pts-pill.real{background:rgba(139,92,246,.14);color:var(--acc)}
 .pts-pill.off{background:rgba(148,163,184,.22);color:var(--muted);font-weight:500}
 .pts-pill.tiny{font-size:10.5px;padding:1px 7px}
 .pts-muted{color:var(--muted);font-size:12.5px}
@@ -329,6 +334,10 @@ export function mountUI(root, api) {
   logo.append(iconEl('bolt', 20));
   const headMid = el('div', 'pts-head-mid');
   headMid.append(el('h2', '', '定时订阅下载'), el('p', '', '选好周几几点，自动到指定站点搜资源并按规则下载到下载器'));
+  // 版本角标：界面长得不对时先看这里，确认浏览器是不是还在用旧缓存
+  const verTag = el('span', 'pts-ver', 'v' + UI_VERSION);
+  verTag.title = '界面版本；如果不是最新版，按 Ctrl+F5 强制刷新';
+  headMid.append(verTag);
   const btnRefresh = el('button', 'pts-icon-btn');
   btnRefresh.type = 'button';
   btnRefresh.title = '刷新';
@@ -746,18 +755,34 @@ export function mountUI(root, api) {
     } : null;
     let pickTimer = null;
     let pickSeq = 0;
+    let pickCount = 0;   // 同名候选数量，用来提醒「还有别的版本」
 
     function metaLine(it) {
       const bits = [];
       if (it.year) bits.push(it.year);
-      bits.push(it.kind === 'movie' ? '电影' : ('剧集 · ' + ((it.season_count || 0) > 1 ? (it.season_count + ' 季') : '1 季')));
+      bits.push(it.kind === 'movie' ? '电影' : '剧集');
+      // 同名作品最常混的就是动漫版和真人版，这里直接标出来
+      if (it.is_anim) bits.push('动画');
+      else if (it.kind !== 'movie') bits.push('真人');
+      else if ((it.genres || []).length) bits.push(it.genres[0]);
+      if (it.kind !== 'movie') {
+        bits.push((it.season_count || 0) > 1 ? (it.season_count + ' 季') : '1 季');
+      }
       if (it.total_eps) bits.push('共 ' + it.total_eps + ' 集');
       return bits.join(' · ');
+    }
+
+    function pickNote(items) {
+      if (items.length > 1) {
+        return 'TMDB 有 ' + items.length + ' 个同名作品，默认第 1 个；选错会下错片，点一行就锁定';
+      }
+      return 'TMDB 只匹配到 1 个作品，已自动选中';
     }
 
     function renderPick(rows, note) {
       pickBox.innerHTML = '';
       pickBox.style.display = '';
+      pickCount = rows.length;
       const head = el('div', 'pts-pick-h');
       head.append(iconEl('search', 13), el('span', '', note || ''));
       pickBox.append(head);
@@ -784,26 +809,29 @@ export function mountUI(root, api) {
         t.append(el('b', '', it.meta_title || ''));
         t.append(el('div', 'pts-pick-m', metaLine(it)));
         row.append(t);
+        if (it.kind !== 'movie' || it.is_anim) {
+          row.append(el('span', 'pts-pill ' + (it.is_anim ? 'anim' : 'real'), it.is_anim ? '动画' : '真人'));
+        }
         if (on) row.append(el('span', 'pts-pill ok', '已选'));
+        row.title = '点这一行就用这个 TMDB 作品';
         row.addEventListener('click', () => {
           pickedMeta = it;
           if (it.kind && it.kind !== segKind.get()) {
             segKind.set(it.kind);
             applyKind();
           }
-          renderPick(rows, '已锁定：' + (it.meta_title || '') + '（' + metaLine(it) + '）');
+          renderPick(rows, '已锁定「' + (it.meta_title || '') + '」' + metaLine(it) + '；点其它行可切换');
           sync();
         });
         pickBox.append(row);
       }
     }
 
-    async function lookup() {
+    async function lookup(preferId) {
       const q = fName.value.trim();
-      pickedMeta = null;
       pickSeq += 1;
       const seq = pickSeq;
-      if (!q) { pickBox.style.display = 'none'; sync(); return; }
+      if (!q) { pickBox.style.display = 'none'; pickedMeta = null; pickCount = 0; sync(); return; }
       pickBox.style.display = '';
       pickBox.innerHTML = '';
       const head = el('div', 'pts-pick-h');
@@ -814,10 +842,19 @@ export function mountUI(root, api) {
           + '&kind=' + encodeURIComponent(segKind.get()));
         if (seq !== pickSeq) return;
         const items = r.items || [];
-        if (!items.length) { renderPick([], r.message || 'TMDB 没找到同名作品'); return; }
-        // 默认选第一个（类型与当前选择一致的排在前面），不对可以点别的
-        pickedMeta = items[0];
-        renderPick(items, 'TMDB 找到 ' + items.length + ' 个作品，默认选第 1 个，认错就点别的');
+        if (!items.length) {
+          pickedMeta = null;
+          renderPick([], r.message || 'TMDB 没找到同名作品');
+          sync();
+          return;
+        }
+        // 编辑已有订阅时保住原来那条；否则默认第 1 个（类型与当前选择一致的排在前面）
+        const want = preferId || (pickedMeta && pickedMeta.tmdb_id) || 0;
+        const hit = items.filter((x) => x.tmdb_id === want)[0];
+        pickedMeta = hit || items[0];
+        renderPick(items, hit
+          ? '当前已选「' + (hit.meta_title || '') + '」' + metaLine(hit) + '；点其它行可切换'
+          : pickNote(items));
         sync();
       } catch (e) {
         if (seq === pickSeq) pickBox.style.display = 'none';
@@ -829,8 +866,11 @@ export function mountUI(root, api) {
       pickTimer = setTimeout(lookup, 650);
     }
     fName.addEventListener('input', lookupSoon);
-    // 编辑已有订阅时，把当前关联的条目直接摆出来
-    if (pickedMeta) renderPick([pickedMeta], '当前已关联 TMDB，改名字会重新识别');
+    // 编辑已有订阅：立刻把该名字下的全部候选拉出来，当前关联的标「已选」，可直接换
+    if (pickedMeta) {
+      renderPick([pickedMeta], '当前已关联 TMDB，正在拉同名候选…');
+      setTimeout(() => lookup(pickedMeta.tmdb_id), 80);
+    }
     mainCol.append(sec1);
 
     // 站点选择（直接读取 MP）
@@ -941,12 +981,13 @@ export function mountUI(root, api) {
     // 右侧配置摘要
     aside.append(el('div', 'pts-sum-title', '配置摘要'));
     const sum = {};
-    for (const [key, label] of [['name', '任务名'], ['sites', '站点'], ['downloader', '下载器'],
-      ['target', '保存到'], ['rules', '资源规则'], ['plan', '执行计划'], ['eps', '集数'],
-      ['notify', '通知'], ['status', '状态']]) {
+    for (const [key, label] of [['name', '任务名'], ['sites', '站点'], ['tmdb', 'TMDB 作品'],
+      ['downloader', '下载器'], ['target', '保存到'], ['rules', '资源规则'], ['plan', '执行计划'],
+      ['eps', '集数'], ['notify', '通知'], ['status', '状态']]) {
       const row = el('div', 'pts-sum-row');
       row.append(el('span', '', label), el('b', '', '—'));
       sum[key] = row.querySelector('b');
+      if (key === 'tmdb') sum.tmdbRow = row;
       aside.append(row);
     }
     const sumHint = el('div', 'pts-hint');
@@ -1005,6 +1046,23 @@ export function mountUI(root, api) {
 
       const rr = collectRules();
       sum.rules.textContent = rulesSummary(rr) || '不限（推荐）';
+      // TMDB 作品：让人在保存前就能确认「选的是动漫还是真人」
+      if (pickedMeta) {
+        const bits = [pickedMeta.meta_title || sum.name.textContent];
+        if (pickedMeta.is_anim) bits.push('动画');
+        else if (pickedMeta.kind !== 'movie') bits.push('真人');
+        if (pickedMeta.year) bits.push(pickedMeta.year);
+        if (pickedMeta.total_eps) bits.push(pickedMeta.total_eps + ' 集');
+        if (pickCount > 1) bits.push('另有 ' + (pickCount - 1) + ' 个同名');
+        sum.tmdb.textContent = bits.join(' · ');
+        sum.tmdb.className = '';
+        sum.tmdbRow.title = pickCount > 1
+          ? 'TMDB 里还有 ' + (pickCount - 1) + ' 个同名作品，认错就在上方列表里点别的'
+          : '已按 TMDB 条目锁定海报与总集数';
+      } else {
+        sum.tmdb.textContent = fName.value.trim() ? '未关联，按名字搜' : '—';
+        sum.tmdb.className = fName.value.trim() ? 'warn' : '';
+      }
       sum.plan.textContent = scheduleText(mode, fTime.value, fWeekday.value, fInterval.value)
         + (retry && win ? `，没更新 ${retry} 分钟后再搜` : '');
       const a = numOrNull(fEpStart);

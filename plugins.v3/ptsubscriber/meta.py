@@ -57,6 +57,27 @@ def poster_url(path: str | None) -> str:
     return IMAGE_BASE + text
 
 
+def genre_info(data: Any) -> tuple[list[str], bool]:
+    """从 TMDB 详情里取题材名，并判断是不是动画（类型 16）。
+
+    同名作品最容易混的就是「动漫版」和「真人版」，例如《凡人修仙传》2020 是动画、
+    2025 是真人剧，光看年份和集数不好分，标出动画/真人一眼就能选对。
+    """
+    names: list[str] = []
+    anim = False
+    for item in (data or {}).get("genres") or []:
+        try:
+            gid = int((item or {}).get("id") or 0)
+        except (AttributeError, TypeError, ValueError):
+            gid = 0
+        name = str((item or {}).get("name") or "").strip()
+        if name:
+            names.append(name)
+        if gid == 16:
+            anim = True
+    return names, anim
+
+
 def resolve(name: str, kind: str = "series", season: int | None = None,
             tmdb_id: int | None = None) -> dict:
     """按剧名去 TMDB 找条目，返回海报/年份/总集数等元数据。
@@ -96,11 +117,12 @@ def resolve(name: str, kind: str = "series", season: int | None = None,
     return meta
 
 
-def search(name: str, kind: str = "series", limit: int = 3) -> list[dict]:
-    """按名字列出同名候选（含年份、类型、季数、总集数），给前端点选用。
+def search(name: str, kind: str = "series", limit: int = 4) -> list[dict]:
+    """按名字列出同名候选（含年份、动画/真人、季数、总集数），给前端点选用。
 
-    同名作品很容易认错（《天下第一》既有 2005 剧集也有 2021 电影），
-    所以把候选都摆出来，用户点哪个就用哪个的 TMDB ID。
+    同名作品很容易认错（《天下第一》既有 2005 剧集也有 2021 电影，
+    《凡人修仙传》2020 是动画、2025 是真人剧），所以把候选都摆出来，
+    用户点哪个就用哪个的 TMDB ID。
     """
     title = str(name or "").strip()
     if len(title) < 1:
@@ -144,6 +166,8 @@ def search(name: str, kind: str = "series", limit: int = 3) -> list[dict]:
                 "total_eps": int(detail.get("total_eps") or 0),
                 "season_count": len(seasons),
                 "seasons": seasons,
+                "genres": detail.get("genres") or [],
+                "is_anim": bool(detail.get("is_anim")),
             })
     return out
 
@@ -185,6 +209,7 @@ def _movie_details(tmdb_id: int) -> dict:
     from app.modules.themoviedb.tmdbv3api import Movie
 
     data = Movie().details(tmdb_id) or {}
+    genres, anim = genre_info(data)
     return {
         "meta_title": data.get("title") or data.get("original_title") or "",
         "year": str(data.get("release_date") or "")[:4],
@@ -192,6 +217,8 @@ def _movie_details(tmdb_id: int) -> dict:
         "total_eps": 1,
         "season_eps": 1,
         "seasons": [],
+        "genres": genres,
+        "is_anim": anim,
     }
 
 
@@ -201,6 +228,7 @@ def _tv_details(tmdb_id: int, season: int | None) -> dict:
     data = TV().details(tmdb_id) or {}
     seasons = clean_seasons(data.get("seasons"))
     total = pick_total(seasons, season)
+    genres, anim = genre_info(data)
     return {
         "meta_title": data.get("name") or data.get("original_name") or "",
         "year": str(data.get("first_air_date") or "")[:4],
@@ -208,4 +236,6 @@ def _tv_details(tmdb_id: int, season: int | None) -> dict:
         "total_eps": total or int(data.get("number_of_episodes") or 0),
         "season_eps": total or int(data.get("number_of_episodes") or 0),
         "seasons": seasons,
+        "genres": genres,
+        "is_anim": anim,
     }

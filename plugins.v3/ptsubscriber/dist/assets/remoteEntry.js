@@ -2,13 +2,13 @@
 const currentImports = {};
 const exportSet = new Set(['Module', '__esModule', 'default', '_export_sfc']);
 const moduleMap = {
-  "./Page": () => __federation_import('./__federation_expose_Page.js').then(module =>
+  "./Page": () => __federation_import('./__federation_expose_Page.js?v=1.2.0').then(module =>
     Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module),
-  "./Config": () => __federation_import('./__federation_expose_Page.js').then(module =>
+  "./Config": () => __federation_import('./__federation_expose_Page.js?v=1.2.0').then(module =>
     Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module),
-  "./Dashboard": () => __federation_import('./__federation_expose_Page.js').then(module =>
+  "./Dashboard": () => __federation_import('./__federation_expose_Page.js?v=1.2.0').then(module =>
     Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module),
-  "./AppPage": () => __federation_import('./__federation_expose_Page.js').then(module =>
+  "./AppPage": () => __federation_import('./__federation_expose_Page.js?v=1.2.0').then(module =>
     Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module),
 };
 
