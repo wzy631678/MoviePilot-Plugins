@@ -1,5 +1,5 @@
 /* PtSubscriber 插件页面：原生 DOM，无构建工具，宿主注入的 api 负责鉴权。 */
-const UI_VERSION = '1.2.4';
+const UI_VERSION = '1.2.5';
 const CSS = `
 .pts-root,.pts-ov{--acc:#8b5cf6;--acc2:#a78bfa;--sur:#ffffff;--sur2:#f7f7fb;--sur3:#eeeef6;--on:#1f2230;--muted:rgba(31,34,48,.58);--line:rgba(17,24,39,.1);--soft:rgba(139,92,246,.12);--danger:#dc2626;--ok:#16a34a;--warn:#b45309}
 .pts-dark{--sur:#1b1e26;--sur2:#232733;--sur3:#2b3040;--on:#e9ebf2;--muted:rgba(233,235,242,.6);--line:rgba(255,255,255,.12);--soft:rgba(139,92,246,.22);--danger:#f87171;--ok:#4ade80;--warn:#fbbf24}
@@ -189,6 +189,8 @@ const CSS = `
 .pts-badge{font-size:10.8px;padding:1.5px 8px;border-radius:999px;background:var(--soft);color:var(--acc);font-weight:600}
 .pts-badge.warn{background:rgba(220,38,38,.12);color:var(--danger)}
 .pts-badge.ok{background:rgba(34,197,94,.14);color:var(--ok)}
+.pts-badge.match{background:rgba(34,197,94,.2);color:var(--ok);box-shadow:inset 0 0 0 1px rgba(34,197,94,.5)}
+.pts-badge.mid{background:rgba(245,158,11,.16);color:var(--warn)}
 .pts-meta{display:flex;gap:10px;flex-wrap:wrap;font-size:11.6px;color:var(--muted);margin-top:6px}
 .pts-dot{width:4px;height:4px;border-radius:50%;background:currentColor;opacity:.5;display:inline-block;margin:0 2px}
 @media (max-width:900px){
@@ -243,6 +245,127 @@ function escapeRe(text) {
 // 片名「骨架」：去空格与常见分隔符、小写，用来判断两个名字是否同一个
 function skeleton(text) {
   return String(text || '').replace(/[\s··\-_.()\[\]{}【】（）:：]+/g, '').toLowerCase();
+}
+
+/* ---------------- 资源 vs TMDB 认准作品：多要素比对 ----------------
+   只比片名不够：《天下第一》(2005 剧集) 会跟《别装了，你就是天下第一》(2025)、
+   《天下第一》(1983 电影)、《天下第一》(2021) 混成一片，全标「匹配」反而误导。
+   这里逐项比：①片名是不是一个独立片名 ②年份 ③剧集/电影 ④集数 ⑤动画/真人。 */
+
+// 资源名里的画质/来源/语言噪声，比对片名前先剥掉
+const RES_NOISE_RE = /(\d{3,4}\s*[piPI]|[48]\s*K|2160|1080|720|WEB[-_. ]?DL|WEB[-_. ]?Rip|Blu[-_. ]?Ray|BDRip|DVDRip|HDTV|REMUX|x ?26[45]|H\.?26[45]|HEVC|AVC|AAC|E?AC3|DTS(?:-HD)?|FLAC|TrueHD|Atmos|HDR10?|10bit|60fps|高码|高帧|修复版?|国语|粤语|英语|日语|韩语|中字|简繁|繁體|简体|中文字幕|内嵌|外挂|全\s*\d{1,4}\s*集|更新至\s*\d{1,4}\s*集|完结|第[一二三四五六七八九十\d]+季|S\d{2}(?:E\d{2})?)/gi;
+
+// 剥掉括号内容与画质标签，只留片名主体（用空格分段）
+function resCore(text) {
+  let s = String(text || '');
+  s = s.replace(/\[[^\]]*\]|【[^】]*】|\([^)]*\)|（[^）]*）/g, ' ');
+  s = s.replace(RES_NOISE_RE, ' ');
+  s = s.replace(/[.\-_/|·,，、!！?？:：;；"'“”‘’《》]/g, ' ');
+  return s.replace(/\s+/g, ' ').trim();
+}
+
+/* 片名比对：exact 独立片名 / loose 只有数字英文等附加 / wrapped 被别的汉字包着 / '' 没提到 */
+function titleVerdict(item, title) {
+  const want = skeleton(title);
+  if (!want) return '';
+  let best = '';
+  for (const raw of [item.display_title, item.title, item.original_title]) {
+    const core = resCore(raw);
+    if (!core) continue;
+    for (const seg of core.split(' ')) {
+      if (!seg) continue;
+      if (skeleton(seg) === want) return 'exact';
+      if (seg.indexOf(title) >= 0) {
+        const extra = seg.split(title).join('');
+        // 《别装了，你就是天下第一》《我家孙子天下第一》：多出来的汉字说明是另一部作品
+        if (/[\u4e00-\u9fff]/.test(extra)) { if (!best) best = 'wrapped'; }
+        else if (best !== 'wrapped') best = 'loose';
+      } else if (skeleton(seg).indexOf(want) >= 0) {
+        if (best !== 'wrapped') best = 'loose';
+      }
+    }
+    if (!best) {
+      const sk = skeleton(core);
+      if (sk === want) return 'exact';
+      if (sk.indexOf(want) >= 0) best = 'loose';
+    }
+  }
+  return best;
+}
+
+// 资源名里出现的年份（19xx / 20xx），排除 2160p 这类分辨率
+function yearsIn(item) {
+  const hay = [item.title, item.original_title, item.display_subtitle].filter(Boolean).join(' ');
+  const out = [];
+  const re = /(?:19|20)\d{2}/g;
+  let m;
+  while ((m = re.exec(hay))) {
+    const y = parseInt(m[0], 10);
+    if (y >= 1900 && y <= 2035 && !out.includes(y)) out.push(y);
+  }
+  return out;
+}
+
+// 资源标称集数：全 35 集 / 更新至 12 集 / S01E05 视为单集
+function epsIn(item) {
+  const hay = [item.title, item.display_title, item.original_title, item.display_subtitle]
+    .filter(Boolean).join(' ');
+  let m = hay.match(/全\s*(\d{1,4})\s*集/) || hay.match(/更新至\s*(\d{1,4})\s*集/)
+    || hay.match(/(\d{1,4})\s*集全/);
+  if (m) return parseInt(m[1], 10);
+  if (/S\d{2}E\d{2}/i.test(hay)) return 1;
+  return 0;
+}
+
+// 资源是剧集还是电影
+function kindVerdict(item) {
+  const cat = String(item.category || '');
+  if (/电影|電影|movie/i.test(cat)) return 'movie';
+  if (/电视剧|電視劇|剧集|連續劇|连续剧|series|tv/i.test(cat)) return 'series';
+  const hay = [item.title, item.display_subtitle, item.original_title].filter(Boolean).join(' ');
+  if (/全\s*\d{1,4}\s*集|更新至\s*\d{1,4}\s*集|第[一二三四五六七八九十\d]+季|S\d{2}(?:E\d{2})?/.test(hay)) return 'series';
+  if (/电影|電影|剧场版|劇場版/.test(hay)) return 'movie';
+  return '';
+}
+
+/* 逐项对比，返回 { level, notes }
+   exact 五项都对得上 / near 同名但有关键要素不符 / other 同名其它作品 / none 没提到这个名字 */
+function compareWork(item, meta) {
+  if (!meta || !meta.title) return null;
+  const t = titleVerdict(item, meta.title);
+  if (!t) return { level: 'none', notes: [] };
+  if (t === 'wrapped') return { level: 'other', notes: [] };
+
+  const notes = [];
+  const wantYear = parseInt(meta.year, 10) || 0;
+  const years = yearsIn(item);
+  if (wantYear && years.length && !years.includes(wantYear)) {
+    const near = years.reduce((a, b) => (Math.abs(b - wantYear) < Math.abs(a - wantYear) ? b : a));
+    notes.push(`${near} 年 ≠ ${wantYear}`);
+  }
+  const wantEps = parseInt(meta.total_eps, 10) || 0;
+  const gotEps = epsIn(item);
+  if (wantEps && gotEps && gotEps !== wantEps && Math.abs(gotEps - wantEps) > Math.max(2, wantEps * 0.1)) {
+    notes.push(`${gotEps} 集 ≠ ${wantEps} 集`);
+  }
+  const gotKind = kindVerdict(item);
+  if (meta.kind && gotKind && gotKind !== meta.kind) {
+    notes.push(gotKind === 'movie' ? '是电影不是剧集' : '是剧集不是电影');
+  }
+  const wordy = [item.title, item.display_subtitle].filter(Boolean).join(' ');
+  if (meta.is_anim === false && /动画|动漫|卡通/.test(wordy)) notes.push('标了动画（认准是真人）');
+  if (meta.is_anim === true && /真人/.test(wordy)) notes.push('标了真人（认准是动画）');
+
+  return notes.length ? { level: 'near', notes } : { level: 'exact', notes: [] };
+}
+
+// 卡片上的比对结论标签
+function matchBadge(cmp) {
+  if (!cmp) return null;
+  if (cmp.level === 'exact') return { text: '✓ 匹配认准作品', cls: 'match' };
+  if (cmp.level === 'near') return { text: '同名但 ' + cmp.notes.join('，'), cls: 'mid' };
+  if (cmp.level === 'other') return { text: '同名其它作品', cls: 'warn' };
+  return null;
 }
 
 function iconEl(name, size) {
@@ -563,6 +686,7 @@ export function mountUI(root, api) {
     options: null, subs: [], logs: [], hits: [],
     result: null, selected: new Set(), probe: null, tab: 'subs', prefix: null,
     searchedMeta: null,   // 找资源页：搜索时 TMDB 认准的作品（用于给结果标注是否对得上）
+    onlyMatch: false,     // 找资源页：只显示真正对得上认准作品的那些
   };
   let activeOverlay = null;
 
@@ -1518,6 +1642,7 @@ export function mountUI(root, api) {
         if (!r.ok) { status.textContent = r.message || '搜索失败'; return; }
         state.result = r;
         state.selected.clear();
+        state.onlyMatch = false;
         status.textContent = `共 ${r.items.length} 条，符合规则 ${r.passed} 条`;
         drawResults();
       } catch (e) {
@@ -1555,15 +1680,9 @@ export function mountUI(root, api) {
     // 判断一条结果是否对得上搜索时 TMDB 认准的作品。
     // 返回 'ok'（标题里的确是这个作品）/ 'other'（含同名但其实是别的）/ null（没法判断）。
     // 「天下第一」后面直接跟中文（如「天下第一良配」）视为同名其它，不是认准那部。
+    // 结果与「认准作品」的比对结论（片名/年份/剧影/集数/动画），一次算好给排序与卡片共用
     function metaMatchState(item) {
-      const meta = state.searchedMeta;
-      if (!meta || !meta.title) return null;
-      const hay = [item.title, item.display_title, item.original_title].filter(Boolean).join(' | ');
-      if (!hay) return null;
-      const exact = new RegExp(escapeRe(meta.title) + '(?![\\u4e00-\\u9fff])');
-      if (exact.test(hay)) return 'ok';
-      if (hay.indexOf(meta.title) !== -1) return 'other';
-      return null;
+      return compareWork(item, state.searchedMeta);
     }
 
     function drawResults() {
@@ -1579,56 +1698,95 @@ export function mountUI(root, api) {
         resultBox.append(el('div', 'pts-empty', '没有搜到资源。可换个关键词，或确认 MP 站点已启用且有搜索索引。'));
         return;
       }
-      // 认准作品提示条：让用户一眼看出「按哪部在搜」以及结果对不对得上
+      // 一次算好每条的比对结论：片名 / 年份 / 剧影 / 集数 / 动画，排序与卡片共用
       const meta = state.searchedMeta;
+      const cmpMap = new Map();
+      const tally = { exact: 0, near: 0, other: 0, none: 0 };
+      for (const it of state.result.items) {
+        const c = compareWork(it, meta);
+        cmpMap.set(it.key, c);
+        tally[(c && c.level) || 'none'] += 1;
+      }
+      // 认准作品提示条：写明「按哪部、比了哪几个要素、这堆结果里有几条真对得上」
       if (meta && meta.title) {
-        const okCount = state.result.items.filter((it) => metaMatchState(it) === 'ok').length;
-        const line = el('div', 'pts-banner info');
-        line.append(iconEl('search', 15));
+        const bits = [];
+        if (meta.year) bits.push(meta.year);
+        if (meta.kind) bits.push(meta.kind === 'movie' ? '电影' : '剧集');
+        if (typeof meta.is_anim === 'boolean') bits.push(meta.is_anim ? '动画' : '真人');
+        if (meta.total_eps) bits.push('共 ' + meta.total_eps + ' 集');
+        const line = el('div', 'pts-banner ' + (tally.exact ? 'info' : 'bad'));
+        line.append(iconEl(tally.exact ? 'search' : 'alert', 15));
         const txt = el('div');
         txt.style.flex = '1';
         txt.style.minWidth = '0';
-        const head = el('b', '', `按 TMDB 认准的《${meta.title}》${meta.year ? '（' + meta.year + '）' : ''} 搜索`);
+        const head = el('b', '', `按 TMDB 认准的《${meta.title}》搜索`);
         head.style.display = 'block';
-        const body = el('span', '', okCount > 0
-          ? `这 ${state.result.items.length} 条里有 ${okCount} 条对得上这部，已排在最前；其余同名其它剧排在后面并标「同名其它」，别下错。`
-          : `这 ${state.result.items.length} 条里没有一部对得上这部——下面多半是同名其它剧，先核对再勾选。`);
+        const want = el('span', '', bits.length ? `比对要素：${bits.join(' · ')}` : '');
+        want.style.display = 'block';
+        want.style.fontSize = '12px';
+        want.style.opacity = '.8';
+        const body = el('span', '');
         body.style.fontSize = '12px';
         body.style.opacity = '.85';
-        txt.append(head, body);
+        if (tally.exact) {
+          body.textContent = `这 ${state.result.items.length} 条里 ${tally.exact} 条对得上（片名、年份、类型、集数都一致），已排最前`;
+          if (tally.near || tally.other) body.textContent += `；${tally.near + tally.other} 条同名但要素不符或不是这部，标了原因`;
+          body.textContent += '。';
+        } else {
+          body.textContent = `这 ${state.result.items.length} 条里没有一部是这部：`
+            + `${tally.near} 条同名但年份/类型/集数对不上，${tally.other} 条是同名别的作品`
+            + `${tally.none ? `，${tally.none} 条没提到这个名字` : ''}。别下错。`;
+        }
+        txt.append(head, want, body);
         line.append(txt);
+        if (tally.exact) {
+          const only = button(state.onlyMatch ? '显示全部' : `只看这部（${tally.exact}）`, () => {
+            state.onlyMatch = !state.onlyMatch;
+            drawResults();
+          });
+          only.className = 'pts-btn ghost';
+          only.style.whiteSpace = 'nowrap';
+          line.append(only);
+        }
         resultBox.append(line);
       }
-      // 认准作品排前面：0「✓ 匹配认准作品」→ 1 其它 → 2「同名其它」
-      // 同组内先列符合规则的，再保持站点原始顺序
+      // 排序：完全对上 → 没提到名字（可能靠原名命中）→ 同名但要素不符 → 同名其它作品
+      const RANK = { exact: 0, none: 1, near: 2, other: 3 };
       const rankOf = (it) => {
-        const m = metaMatchState(it);
-        return m === 'ok' ? 0 : (m === 'other' ? 2 : 1);
+        const c = cmpMap.get(it.key);
+        return RANK[(c && c.level) || 'none'];
       };
-      const items = state.result.items
+      let items = state.result.items
         .map((it, idx) => ({ it, idx }))
         .sort((a, b) => (rankOf(a.it) - rankOf(b.it))
           || ((a.it.reason ? 1 : 0) - (b.it.reason ? 1 : 0))
           || (a.idx - b.idx))
         .map((x) => x.it);
+      if (state.onlyMatch && tally.exact) items = items.filter((it) => rankOf(it) === 0);
       const grid = el('div', 'pts-grid');
-      const buckets = [[], [], []];
+      const buckets = [[], [], [], []];
       for (const it of items) buckets[rankOf(it)].push(it);
-      const titles = ['✓ 匹配认准作品', '其它结果', '同名其它（多半不是这部，别下错）'];
+      const titles = [
+        '✓ 匹配认准作品',
+        '其它结果',
+        '同名但年份 / 类型 / 集数对不上（不是这部）',
+        '同名其它作品（片名被别的剧名包着）',
+      ];
       // 只有带上认准作品、且确实分了组时，才插分组标题
-      const showHeads = !!(meta && meta.title) && buckets.filter((b) => b.length).length > 1;
+      const showHeads = !!(meta && meta.title) && !state.onlyMatch
+        && buckets.filter((b) => b.length).length > 1;
       buckets.forEach((bucket, idx) => {
         if (!bucket.length) return;
         if (showHeads) {
           grid.append(el('div', 'pts-group' + (idx === 0 ? ' ok' : ' dim'),
             `${titles[idx]} · ${bucket.length} 条`));
         }
-        for (const item of bucket) grid.append(resultCard(item));
+        for (const item of bucket) grid.append(resultCard(item, cmpMap.get(item.key)));
       });
       resultBox.append(grid);
     }
 
-    function resultCard(item) {
+    function resultCard(item, cmp) {
       const c = el('div', 'pts-card main');
       const cb = document.createElement('input');
       cb.type = 'checkbox';
@@ -1641,12 +1799,12 @@ export function mountUI(root, api) {
       if (item.display_subtitle) main.append(el('div', 'pts-sub', item.display_subtitle));
       if (item.original_title) main.append(el('div', 'pts-sub', '原名：' + item.original_title));
       const badges = el('div', 'pts-badges');
+      // 比对结论放在最前，一眼看清「是不是这部」，后面才是站点标签与规则结论
+      const mb = matchBadge(cmp === undefined ? metaMatchState(item) : cmp);
+      if (mb) badges.append(el('span', 'pts-badge ' + mb.cls, mb.text));
       for (const b of item.badges || []) badges.append(el('span', 'pts-badge', b));
       if (item.reason) badges.append(el('span', 'pts-badge warn', item.reason));
       else badges.append(el('span', 'pts-badge ok', '符合规则'));
-      const ms = metaMatchState(item);
-      if (ms === 'ok') badges.append(el('span', 'pts-badge ok', '✓ 匹配认准作品'));
-      else if (ms === 'other') badges.append(el('span', 'pts-badge warn', '同名其它'));
       main.append(badges);
       const meta = el('div', 'pts-meta');
       meta.append(el('span', '', item.site || ''), el('span', '', fmtSize(item.size_gb)),
