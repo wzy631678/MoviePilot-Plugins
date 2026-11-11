@@ -247,6 +247,164 @@ def pick_rows(addr: str, total: int, *, multi: bool = False) -> list[int] | None
     return nums or None
 
 
+_WEEK_CN = {"mon": "一", "tue": "二", "wed": "三", "thu": "四",
+            "fri": "五", "sat": "六", "sun": "日"}
+
+# 「就这样吧」这类确认词：用户不想再改参数时一句话建订阅
+_CONFIRM_WORDS = ("确定", "确认", "就这样", "就这个", "默认", "都行", "随便", "可以",
+                  "好了", "开始", "ok", "OK", "Ok", "yes", "嗯")
+
+
+def is_confirm(text: str) -> bool:
+    """判断这句话是不是「按当前设置建吧」。"""
+    s = _clean(text).strip("。.!！ ")
+    if not s:
+        return False
+    if s in _CONFIRM_WORDS:
+        return True
+    # 「就这样吧」「那就确定」「默认就行」这类也不刁难用户
+    return any(w in s for w in ("就这样", "就按这个", "默认", "都行", "照这个", "开始吧"))
+
+
+def schedule_text(opts: dict[str, Any] | None) -> str:
+    """把计划字段翻成一句人话；没设就返回空串（由调用方补默认）。"""
+    opts = dict(opts or {})
+    mode = opts.get("schedule_mode")
+    if mode == "interval":
+        minutes = int(opts.get("schedule_interval") or 0)
+        if minutes:
+            return f"每 {minutes // 60} 小时" if minutes % 60 == 0 and minutes >= 60 else f"每 {minutes} 分钟"
+    if mode == "weekly":
+        day = _WEEK_CN.get(str(opts.get("schedule_weekday") or "mon"), "一")
+        return f"每周{day} {opts.get('schedule_time') or '03:00'}"
+    if mode == "daily" and opts.get("schedule_time"):
+        return f"每天 {opts['schedule_time']}"
+    return ""
+
+
+def opts_summary(
+    opts: dict[str, Any] | None,
+    *,
+    site_total: int = 0,
+    plan_text: str = "",
+) -> str:
+    """一行摘要：集数范围 · 站点 · 刷新计划。"""
+    opts = dict(opts or {})
+    bits: list[str] = []
+    start = int(opts.get("ep_start") or 0)
+    end = int(opts.get("ep_end") or 0)
+    if start and end and end != start:
+        bits.append(f"只下第{start}-{end}集")
+    elif start:
+        bits.append(f"从第{start}集起")
+    else:
+        bits.append("从第1集起")
+    if opts.get("site_names"):
+        bits.append(str(opts["site_names"]))
+    elif opts.get("site_ids"):
+        bits.append(f"{len(opts['site_ids'])} 个站点")
+    elif site_total:
+        bits.append(f"全部 {site_total} 个可搜站")
+    else:
+        bits.append("全部可搜站")
+    plan = schedule_text(opts) or plan_text
+    if plan:
+        bits.append(plan)
+    if opts.get("run_now"):
+        bits.append("建完立即搜一轮")
+    return " · ".join(bits)
+
+
+def _cand_title(cand: dict) -> str:
+    """候选标题 + 年份 / 类型 / 集数，一行说清是哪一部。"""
+    kind = "剧集" if str(cand.get("kind")) == "series" else "电影"
+    bits = [str(cand.get("year") or "年份未知"), kind]
+    eps = int(cand.get("eps") or 0)
+    if kind == "剧集" and eps:
+        bits.append(f"{eps}集")
+    if cand.get("is_anim"):
+        bits.append("动画")
+    return f"{cand.get('title') or ''}（{' · '.join(bits)}）"
+
+
+def render_pick_menu(
+    cand: dict,
+    *,
+    opts: dict[str, Any] | None = None,
+    site_total: int = 0,
+    plan_text: str = "",
+) -> str:
+    """选完候选后的第二屏：让用户定集数 / 站点 / 刷新时间。"""
+    return "\n".join([
+        f"已选：{_cand_title(cand)}",
+        "",
+        f"当前：{opts_summary(opts, site_total=site_total, plan_text=plan_text)}",
+        "",
+        "要改就回一句，一次改一样（也可以一条全带）：",
+        "· 集数：「从5集」或「5-8集」",
+        "· 站点：「站点馒头」或「站点馒头,岛」",
+        "· 刷新：「每天3:00」「每30分钟」「每周三21:30」，想先下一轮加「立即」",
+        "",
+        "不改就回「确定」，我按上面的设置建订阅并立刻补搜一轮。",
+    ])
+
+
+def render_opts_state(
+    cand: dict,
+    *,
+    opts: dict[str, Any] | None = None,
+    site_total: int = 0,
+    plan_text: str = "",
+) -> str:
+    """改完一项后的第三屏：回显当前设置 + 提示怎么收尾。"""
+    return "\n".join([
+        f"已记下：{_cand_title(cand)}",
+        f"当前：{opts_summary(opts, site_total=site_total, plan_text=plan_text)}",
+        "回「确定」开始；还能接着改集数 / 站点 / 刷新时间。",
+    ])
+
+
+def render_no_choice(key: str = "sub") -> str:
+    """没有进行中的选择时的提示。"""
+    if key == "dl":
+        return "没有待选资源。先发「找资源 片名」，我列资源给你选。"
+    return "没有进行中的选择。先发「订阅 片名」，我列同名作品给你选。"
+
+
+def render_intent_hint(kind: str) -> str:
+    """用户只发了动词（订阅 / 找资源）没带片名时怎么用。"""
+    if kind == "find":
+        return ("用法：找资源 片名 —— 只搜一轮直接下，不建订阅。\n"
+                "例：找资源 仙逆 / 找资源 仙逆 5-8集 / 找资源 仙逆 站点馒头")
+    return ("用法：订阅 片名 —— 列同名作品让你选，选完再定集数/站点/刷新时间。\n"
+            "例：订阅 天才女友 / 订阅 仙逆 从5集 站点馒头 每天3:00")
+
+
+def split_intent(text: str) -> tuple[str, str]:
+    """识别「订阅 X」「找资源 X」这类自然语言入口，返回 (类型, 片名)。
+
+    类型：sub（建订阅）/ find（只找资源）/ 空串（不是本插件的入口）。
+    用户在 QQ 里不带斜杠发消息时，宿主的原生交互链会抢先吃掉，
+    插件要靠这个函数把「订阅 XXX」这类句子认出来并接管。
+    """
+    s = _clean(text).strip()
+    if not s:
+        return "", ""
+    # 先去掉可能的命令前缀和礼貌词
+    s = re.sub(r"^/\s*[A-Za-z]+\s*", "", s).strip()
+    s = re.sub(r"^(?:帮我|帮忙|麻烦|请|给我|我要|我想|想)\s*", "", s).strip()
+    for verbs, kind in (
+        (("找资源", "找片", "搜资源", "找一下资源", "搜索资源"), "find"),
+        (("直接下载", "直接下", "下载这个", "只下载"), "find"),
+        (("订阅", "追剧", "追番", "追更", "添加订阅", "订上"), "sub"),
+    ):
+        for verb in verbs:
+            if s.startswith(verb):
+                rest = s[len(verb):].strip(" ,，、:：")
+                return kind, rest
+    return "", ""
+
+
 def _short(text: str, limit: int = 70) -> str:
     """简介压成一行：去换行、超长截断加省略号。"""
     s = re.sub(r"\s+", " ", str(text or "")).strip()
@@ -280,8 +438,7 @@ def render_candidates(
         if brief:
             lines.append(f"   {brief}")
     if with_hint:
-        lines.append("回序号直接订阅（如「1」）；想选站点/集数/刷新时间就带参数："
-                     "「1 从5集 站点馒头 每天3:00」或「1 每30分钟」或「1 立即」。")
+        lines.append("回序号选（如「1」），选完再定：从第几集开始 / 用哪些站 / 多久刷一次。")
     return "\n".join(lines)
 
 
@@ -325,7 +482,7 @@ def render_resources(
         lines.append(head + _short(title, 58))
     if len(all_rows) > len(items):
         lines.append(f"（只列前 {len(items)} 条，共 {len(all_rows)} 条）")
-    lines.append("回「1」下第 1 条；多条回「1-3」或「1,3」；回「订阅」改成定时订阅。")
+    lines.append("回「1」下第 1 条；多条回「1-3」或「1,3」；回「订阅」改成定时追更。")
     return "\n".join(lines)
 
 
@@ -363,11 +520,10 @@ def render_help() -> str:
     """第一次用或发错时的用法速查（尽量短）。"""
     return "\n".join([
         "【定时订阅下载】",
-        "/ptsub 片名 —— 查同名作品，回序号建订阅",
-        "/ptsub 片名 从5集 站点馒头 立即 —— 参数一次带全",
-        "/ptfind 片名 —— 只找资源直接下，不订阅",
-        "/ptfind 片名 5-8集 —— 只找这几集",
-        "回「1」或「1-3」选序号；/ptlist 看订阅；/ptsub help 看这条",
+        "直接说：订阅 天才女友 —— 不用打斜杠，回序号后选集数/站点/刷新时间",
+        "只下一次：找资源 仙逆 —— 列资源后回 1 或 1-3 直接下，不建订阅",
+        "带参数一条搞定：/ptsub 片名 从5集 站点馒头 每天3:00",
+        "/ptlist 看订阅进度；/ptsub help 看这条",
     ])
 
 
