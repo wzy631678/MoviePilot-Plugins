@@ -280,7 +280,8 @@ def render_candidates(
         if brief:
             lines.append(f"   {brief}")
     if with_hint:
-        lines.append("回复序号直接订阅（如「1」）；带参数改：「1 从5集 站点馒头 立即」。")
+        lines.append("回序号直接订阅（如「1」）；想选站点/集数/刷新时间就带参数："
+                     "「1 从5集 站点馒头 每天3:00」或「1 每30分钟」或「1 立即」。")
     return "\n".join(lines)
 
 
