@@ -93,7 +93,7 @@ def build_trigger(sub: dict, tz: str):
 class PtSubscriber(_PluginBase):
     plugin_name = "定时订阅下载"
     plugin_desc = "自己选周几几点，到指定站点搜资源并按详细规则下载到指定容器；自动对接 TMDB，搜到的资源会按片名、年份、剧集/电影、集数逐项比对，只把真正这部排在最前。支持智能助手和 QQ 等远程入口：/ptsub 片名 建订阅（可带 从N集 / 站点X / 每天3:00 / 立即），/ptfind 片名 只找资源直接下，/ptlist 看订阅进度；回复全是纯文本不带图，QQ 里回个序号就行。"
-    plugin_version = "1.4.0"
+    plugin_version = "1.4.1"
     plugin_author = "wzy"
     plugin_config_prefix = "ptsubscriber_"
     plugin_order = 90
@@ -823,8 +823,7 @@ class PtSubscriber(_PluginBase):
             return self.remote_pick(intent["pick"], key=key, opts=intent)
         name = intent.get("name") or ""
         if not name:
-            return ("没有收到片名。用法：/ptsub 片名；带参数例："
-                    "/ptsub 天下第一 从5集 站点馒头 立即")
+            return remote_ui.render_help()
         return self.remote_start(name, kind=intent.get("kind") or "series",
                                  key=key, opts=intent)
 
@@ -840,12 +839,10 @@ class PtSubscriber(_PluginBase):
             return ("没有收到片名。用法：/ptsub 片名；带参数例："
                     "/ptsub 天下第一 从5集 站点馒头 立即")
         opts = dict(opts or {})
-        sites, unknown = self._resolve_sites(opts.get("sites") or [])
-        if unknown and not sites:
-            return (f"没认出这些站点：{'、'.join(unknown[:4])}\n"
-                    f"{self._remote_sites_text(limit=8)}")
-        opts["site_ids"] = sites
-        opts["unknown_sites"] = unknown
+        extra, msg = self._resolve_sites_or_msg(opts.get("sites") or [])
+        if msg:
+            return msg
+        opts.update(extra)
         want_kind = "movie" if str(opts.get("kind") or kind) == "movie" else "series"
 
         self._pending_prune()
@@ -894,12 +891,10 @@ class PtSubscriber(_PluginBase):
                 merged[field] = value
         # 用户可能在「回序号」这条消息里才补参数（如「2 从7集 站点馒头」）
         if merged.get("sites"):
-            sites, unknown = self._resolve_sites(merged["sites"])
-            if unknown and not sites:
-                return (f"没认出这些站点：{'、'.join(unknown[:4])}\n"
-                        f"{self._remote_sites_text(limit=8)}")
-            merged["site_ids"] = sites
-            merged["unknown_sites"] = unknown
+            extra, msg = self._resolve_sites_or_msg(merged["sites"])
+            if msg:
+                return msg
+            merged.update(extra)
         self._pending.pop(key, None)
         sub = self._remote_create(pending.get("name") or c["title"], c["kind"],
                                   c["tmdb_id"], merged)
@@ -965,11 +960,10 @@ class PtSubscriber(_PluginBase):
                         key: str = "") -> str:
         """搜一轮资源，按做种数排序列出来，等用户回序号。"""
         intent = dict(intent or {})
-        sites, unknown = self._resolve_sites(intent.get("sites") or [])
-        if unknown and not sites:
-            return (f"没认出这些站点：{'、'.join(unknown[:4])}\n"
-                    f"{self._remote_sites_text(limit=8)}")
-        domains = sites or self._default_sites()
+        extra, msg = self._resolve_sites_or_msg(intent.get("sites") or [])
+        if msg:
+            return msg
+        domains = extra.get("site_ids") or self._default_sites()
         if not domains:
             return ("MP 里没有可搜索的站点。请先在 MoviePilot 站点页启用，"
                     "并完成用户认证（否则搜索会返回 0 条）。")
@@ -1127,14 +1121,14 @@ class PtSubscriber(_PluginBase):
             return f"立即执行没启动起来：{type(exc).__name__}: {exc}"
         return "已在后台立即搜一轮，结果会按订阅通知再发你。"
 
-    def _resolve_sites(self, words: List[str]) -> Tuple[List[str], List[str]]:
-        """站点口语名 → MP 站点域名。返回 (命中的域名, 没认出来的词)。
+    def _resolve_sites(self, words: List[str]) -> Tuple[List[str], List[str], List[str]]:
+        """站点口语名 → MP 站点域名。返回 (命中的域名, 没认出来的词, 存在但不可搜的站名)。
 
         用户只会说「馒头」「岛」，不会记域名，所以按 名字包含 / 域名包含 双向模糊匹配。
         """
         words = [str(w).strip() for w in (words or []) if str(w).strip()]
         if not words:
-            return [], []
+            return [], [], []
         try:
             sites = self.bridge.list_sites()
         except Exception:
@@ -1145,6 +1139,7 @@ class PtSubscriber(_PluginBase):
             searchable = set()
         picked: List[str] = []
         unknown: List[str] = []
+        blocked: List[str] = []
         for word in words:
             low = word.lower()
             hit = None
@@ -1165,8 +1160,20 @@ class PtSubscriber(_PluginBase):
                 if domain not in picked:
                     picked.append(domain)
             else:
-                unknown.append(str(hit.get("name") or domain))
-        return picked, unknown
+                # 站点存在但索引器没配好（多半没做用户认证），单独说清楚
+                blocked.append(str(hit.get("name") or domain))
+        return picked, unknown, blocked
+
+    def _resolve_sites_or_msg(self, words: List[str]) -> Tuple[Dict[str, Any], str]:
+        """把站点词解析成 opts，认不出来就返回提示文案（调用方直接回给用户）。"""
+        picked, unknown, blocked = self._resolve_sites(words)
+        if unknown and not picked:
+            return {}, (f"没认出这些站点：{'、'.join(unknown[:4])}\n"
+                        f"{self._remote_sites_text(limit=8)}")
+        if blocked and not picked:
+            return {}, (f"这些站点现在搜不了（索引器未就绪，去 MP 完成用户认证）："
+                        f"{'、'.join(blocked[:4])}\n{self._remote_sites_text(limit=8)}")
+        return {"site_ids": picked, "unknown_sites": unknown + blocked}, ""
 
     def _remote_sites_text(self, limit: int = 9) -> str:
         """能搜的站点清单 + 用法；用户发「站点」或站点打错时给提示。"""
