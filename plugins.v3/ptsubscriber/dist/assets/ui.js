@@ -41,33 +41,33 @@ const CSS = `
 .pts-empty h3{margin:0;font-size:16.5px;font-weight:700}
 .pts-empty p{margin:0;font-size:12.8px;color:var(--muted);max-width:430px;line-height:1.65}
 .pts-empty .pts-btn{margin-top:10px}
-.pts-tasks{display:grid;grid-template-columns:repeat(auto-fill,minmax(344px,1fr));gap:14px}
-.pts-pcard{position:relative;border:1px solid var(--line);border-radius:15px;overflow:hidden;background:var(--sur);cursor:pointer;transition:.18s}
-.pts-pcard:hover{border-color:rgba(139,92,246,.5);box-shadow:0 12px 28px rgba(17,24,39,.13);transform:translateY(-1px)}
-.pts-pcard.off{opacity:.62}
-.pts-pcard .bg{position:absolute;inset:-22%;background-size:cover;background-position:center;filter:blur(15px) saturate(1.25);opacity:.3;pointer-events:none}
-.pts-dark .pts-pcard .bg{opacity:.36}
-.pts-pcard .veil{position:absolute;inset:0;pointer-events:none;background:linear-gradient(90deg,rgba(255,255,255,.97) 6%,rgba(255,255,255,.9) 44%,rgba(255,255,255,.6));}
-.pts-dark .pts-pcard .veil{background:linear-gradient(90deg,rgba(27,30,38,.97) 6%,rgba(27,30,38,.9) 44%,rgba(27,30,38,.62))}
-.pts-pcard .in{position:relative;display:flex;gap:13px;padding:14px 14px 13px}
-.pts-poster{width:88px;height:126px;border-radius:10px;object-fit:cover;flex:none;background:var(--sur2);box-shadow:0 6px 16px rgba(0,0,0,.24)}
-.pts-poster.ph{display:grid;place-items:center;color:var(--acc);font-weight:800;font-size:26px;background:linear-gradient(160deg,var(--sur2),var(--sur3));border:1px solid var(--line);box-shadow:none}
-.pts-pbody{flex:1;min-width:0;display:flex;flex-direction:column;gap:5px}
-.pts-ptop{display:flex;align-items:flex-start;gap:7px;min-width:0}
-.pts-ptitle{display:flex;align-items:flex-start;gap:6px;flex:1;min-width:0}
-.pts-ptitle .pts-pname{flex:0 1 auto}
+.pts-tasks{display:grid;grid-template-columns:repeat(auto-fill,minmax(196px,1fr));gap:16px}
+.pts-pcard{position:relative;border:1px solid var(--line);border-radius:14px;overflow:hidden;background:var(--sur);cursor:pointer;transition:.18s;display:flex;flex-direction:column}
+.pts-pcard:hover{border-color:rgba(139,92,246,.5);box-shadow:0 14px 34px rgba(17,24,39,.2);transform:translateY(-2px)}
+.pts-pcard.off{opacity:.58}
+.pts-pwrap{position:relative;display:block;line-height:0;background:var(--sur2)}
+.pts-poster{width:100%;aspect-ratio:2/3;object-fit:cover;display:block;background:var(--sur2)}
+.pts-poster.ph{display:grid;place-items:center;line-height:1;color:rgba(255,255,255,.24);font-weight:800;font-size:58px;background:linear-gradient(165deg,#4b5063,#23262f)}
+.pts-pcard.noposter .pts-veil{height:46%}
+.pts-veil{position:absolute;left:0;right:0;bottom:0;height:64%;background:linear-gradient(to top,rgba(8,10,16,.93),rgba(8,10,16,.55) 48%,rgba(8,10,16,0));pointer-events:none}
+.pts-ptop{position:absolute;left:0;right:0;bottom:0;padding:0 10px 9px;display:flex;flex-direction:column;gap:4px;line-height:1.3}
+.pts-pname{min-width:0;font-size:14.2px;font-weight:720;color:#fff;text-shadow:0 1px 8px rgba(0,0,0,.75);word-break:break-word;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.pts-pmeta{display:flex;align-items:center;gap:6px;font-size:11px}
+.pts-year{font-weight:700;color:rgba(255,255,255,.84);font-variant-numeric:tabular-nums;flex:none}
+.pts-sbadge{font-size:10.4px;font-weight:750;color:#fff;background:rgba(255,255,255,.2);border-radius:5px;padding:1px 5px;flex:none;letter-spacing:.3px;backdrop-filter:blur(3px)}
+.pts-sbadge.off{background:rgba(255,255,255,.14);color:rgba(255,255,255,.78)}
+.pts-pbody{display:flex;align-items:center;gap:8px;padding:9px 11px 10px;font-size:12.2px;color:var(--muted)}
 .pts-pbar{position:absolute;left:0;right:0;bottom:0;height:2.5px;background:rgba(139,92,246,.13)}
 .pts-pbar>span{display:block;height:100%;background:linear-gradient(90deg,var(--acc),var(--acc2))}
-.pts-year{font-size:11.6px;color:var(--muted);font-weight:650;flex:none;padding-top:3px;font-variant-numeric:tabular-nums}
-.pts-pname{flex:1;min-width:0;font-size:15.6px;font-weight:720;line-height:1.34;word-break:break-word;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.pts-sbadge{font-size:11px;font-weight:750;color:var(--acc);background:var(--soft);border-radius:6px;padding:1px 6px;flex:none;margin-top:1px;letter-spacing:.3px}
-.pts-pfoot{display:flex;align-items:center;gap:8px;margin-top:auto;font-size:12.2px;color:var(--muted);padding-top:3px}
 .pts-prog{display:inline-flex;align-items:center;gap:4px;font-weight:700;color:var(--on);font-variant-numeric:tabular-nums}
 .pts-prog .pts-ico{opacity:.7}
-.pts-pfoot .sp{flex:1}
+.pts-pbody .sp{flex:1}
 .pts-kebab{width:25px;height:25px;border-radius:7px;border:0;background:transparent;color:var(--muted);cursor:pointer;display:grid;place-items:center;flex:none;padding:0}
 .pts-kebab:hover{background:var(--soft);color:var(--acc)}
-.pts-menu{position:absolute;right:9px;bottom:40px;z-index:30;background:var(--sur);border:1px solid var(--line);border-radius:11px;box-shadow:0 16px 36px rgba(0,0,0,.22);padding:5px;min-width:136px;display:flex;flex-direction:column;gap:1px}
+.pts-kebab.on-poster{position:absolute;top:7px;right:7px;width:27px;height:27px;background:rgba(10,12,18,.46);color:#fff;backdrop-filter:blur(4px);opacity:.5;transition:.16s}
+.pts-pcard:hover .pts-kebab.on-poster,.pts-kebab.on-poster:focus{opacity:1}
+.pts-kebab.on-poster:hover{background:rgba(10,12,18,.78);color:#fff}
+.pts-menu{position:absolute;right:8px;top:40px;z-index:30;background:var(--sur);border:1px solid var(--line);border-radius:11px;box-shadow:0 16px 36px rgba(0,0,0,.24);padding:5px;min-width:132px;display:flex;flex-direction:column;gap:1px}
 .pts-menu button{border:0;background:transparent;color:var(--on);text-align:left;padding:7px 9px;border-radius:7px;font-size:12.6px;cursor:pointer;font-family:inherit;display:flex;align-items:center;gap:8px;white-space:nowrap}
 .pts-menu button:hover{background:var(--soft);color:var(--acc)}
 .pts-menu button.danger{color:var(--danger)}
@@ -620,26 +620,28 @@ export function mountUI(root, api) {
   }
 
   function taskCard(sub) {
-    const card = el('div', 'pts-pcard' + (sub.enabled ? '' : ' off'));
-    const bg = el('div', 'bg');
-    if (sub.poster_url) bg.style.backgroundImage = 'url("' + sub.poster_url + '")';
-    card.append(bg, el('div', 'veil'));
+    const card = el('div', 'pts-pcard' + (sub.enabled ? '' : ' off') + (sub.poster_url ? '' : ' noposter'));
 
-    const inner = el('div', 'in');
-    inner.append(posterNode(sub));
+    // 海报当主角：顶部通栏大图，标题压在图片底部
+    const wrap = el('div', 'pts-pwrap');
+    wrap.append(posterNode(sub), el('div', 'pts-veil'));
+
+    const top = el('div', 'pts-ptop');
+    top.append(el('div', 'pts-pname', sub.name));
+    const meta = el('div', 'pts-pmeta');
+    if (sub.year) meta.append(el('span', 'pts-year', sub.year));
+    if (sub.kind === 'movie') meta.append(el('span', 'pts-sbadge', '电影'));
+    else if (sub.season) meta.append(el('span', 'pts-sbadge', 'S' + String(sub.season).padStart(2, '0')));
+    if (!sub.enabled) meta.append(el('span', 'pts-sbadge off', '已停用'));
+    if (meta.childNodes.length) top.append(meta);
+    wrap.append(top);
+
+    const kebab = kebabMenu(sub, card);
+    kebab.classList.add('on-poster');
+    wrap.append(kebab);
+    card.append(wrap);
 
     const bodyEl = el('div', 'pts-pbody');
-    const top = el('div', 'pts-ptop');
-    if (sub.year) top.append(el('span', 'pts-year', sub.year));
-    const tit = el('div', 'pts-ptitle');
-    tit.append(el('div', 'pts-pname', sub.name));
-    if (sub.kind !== 'movie' && sub.season) {
-      tit.append(el('span', 'pts-sbadge', 'S' + String(sub.season).padStart(2, '0')));
-    }
-    top.append(tit);
-    bodyEl.append(top);
-
-    const foot = el('div', 'pts-pfoot');
     const prog = el('span', 'pts-prog');
     prog.append(iconEl('download', 13));
     const done = Number(sub.done_eps || 0);
@@ -652,14 +654,12 @@ export function mountUI(root, api) {
     } else {
       prog.append(el('b', '', done ? done + ' 集' : '待补搜'));
     }
-    foot.append(prog, el('span', 'sp'));
+    bodyEl.append(prog, el('span', 'sp'));
     const when = el('span', '', ago(sub.last_run_at));
     if (sub.next_run_at) when.title = '下次执行 ' + sub.next_run_at;
-    foot.append(when, kebabMenu(sub, card));
-    bodyEl.append(foot);
+    bodyEl.append(when);
+    card.append(bodyEl);
 
-    inner.append(bodyEl);
-    card.append(inner);
     // 底部细进度条：一眼看出补到哪儿了
     if (sub.kind !== 'movie' && total > 0) {
       const bar = el('div', 'pts-pbar');
