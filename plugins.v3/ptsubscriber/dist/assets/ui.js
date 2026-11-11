@@ -1,5 +1,5 @@
 /* PtSubscriber 插件页面：原生 DOM，无构建工具，宿主注入的 api 负责鉴权。 */
-const UI_VERSION = '1.2.0';
+const UI_VERSION = '1.2.1';
 const CSS = `
 .pts-root,.pts-ov{--acc:#8b5cf6;--acc2:#a78bfa;--sur:#ffffff;--sur2:#f7f7fb;--sur3:#eeeef6;--on:#1f2230;--muted:rgba(31,34,48,.58);--line:rgba(17,24,39,.1);--soft:rgba(139,92,246,.12);--danger:#dc2626;--ok:#16a34a;--warn:#b45309}
 .pts-dark{--sur:#1b1e26;--sur2:#232733;--sur3:#2b3040;--on:#e9ebf2;--muted:rgba(233,235,242,.6);--line:rgba(255,255,255,.12);--soft:rgba(139,92,246,.22);--danger:#f87171;--ok:#4ade80;--warn:#fbbf24}
@@ -88,6 +88,16 @@ const CSS = `
 .pts-pick-t b{font-size:13.2px;font-weight:650;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pts-pick-m{font-size:11.5px;color:var(--muted);margin-top:2px}
 .pts-pick-row .pts-pill{flex:none}
+/* 选中后收起成一行：点整行或「更换」再展开，不占版面 */
+.pts-pick.min{border-color:rgba(139,92,246,.4);background:var(--sur)}
+.pts-pick-min{display:flex;align-items:center;gap:10px;padding:7px 9px;cursor:pointer;transition:.12s}
+.pts-pick-min:hover{background:var(--sur2)}
+.pts-pick-min .pts-pick-t b{font-size:13.4px;font-weight:680}
+.pts-pick-min .pts-pill{flex:none}
+.pts-pick-swap{margin-left:auto;display:inline-flex;align-items:center;gap:4px;flex:none;font-size:12.2px;font-weight:750;color:var(--acc);padding:4px 9px;border-radius:8px;border:1px solid var(--line);background:var(--sur)}
+.pts-pick-min:hover .pts-pick-swap{border-color:rgba(139,92,246,.5);background:var(--soft)}
+.pts-pick-collapse{margin-left:auto;display:inline-flex;align-items:center;gap:4px;flex:none;font-size:11.8px;font-weight:680;color:var(--muted);cursor:pointer;border:0;background:transparent;padding:3px 6px;border-radius:6px;font-family:inherit}
+.pts-pick-collapse:hover{color:var(--acc);background:var(--soft)}
 .pts-chips{display:flex;flex-wrap:wrap;gap:6px;flex:1 1 auto;min-width:0}
 .pts-chip{border:1px solid var(--line);background:var(--sur);color:var(--on);border-radius:999px;padding:6px 13px;font-size:12.5px;cursor:pointer;transition:.15s;font-family:inherit;font-weight:500}
 .pts-chip:hover{border-color:rgba(139,92,246,.55)}
@@ -752,10 +762,16 @@ export function mountUI(root, api) {
       tmdb_id: sub.tmdb_id, meta_title: sub.meta_title || sub.name, year: sub.year || '',
       kind: sub.kind || 'series', total_eps: sub.total_eps || 0,
       season_count: (sub.seasons || []).length, poster_url: sub.poster_url || '',
+      genres: sub.genres || [], is_anim: sub.is_anim,
     } : null;
     let pickTimer = null;
     let pickSeq = 0;
     let pickCount = 0;   // 同名候选数量，用来提醒「还有别的版本」
+
+    let pickRows = [];        // 最近一次查到的全部同名候选
+    let pickOpen = false;     // 候选列表是否展开（选中后自动收起成一行）
+    let pickNoteText = '';
+    let pickLoading = false;
 
     function metaLine(it) {
       const bits = [];
@@ -772,6 +788,13 @@ export function mountUI(root, api) {
       return bits.join(' · ');
     }
 
+    function animPill(it) {
+      // 类型还没查回来时不瞎标，避免编辑一打开就闪一下错的标签
+      if (typeof it.is_anim !== 'boolean') return null;
+      if (it.kind === 'movie' && !it.is_anim) return null;
+      return el('span', 'pts-pill ' + (it.is_anim ? 'anim' : 'real'), it.is_anim ? '动画' : '真人');
+    }
+
     function pickNote(items) {
       if (items.length > 1) {
         return 'TMDB 有 ' + items.length + ' 个同名作品，默认第 1 个；选错会下错片，点一行就锁定';
@@ -779,72 +802,134 @@ export function mountUI(root, api) {
       return 'TMDB 只匹配到 1 个作品，已自动选中';
     }
 
-    function renderPick(rows, note) {
+    function posterThumb(it) {
+      if (it.poster_url) {
+        const im = el('img', 'pts-pick-img');
+        im.src = it.poster_url;
+        im.alt = '';
+        im.loading = 'lazy';
+        im.addEventListener('error', () => im.replaceWith(el('div', 'pts-pick-img')));
+        return im;
+      }
+      return el('div', 'pts-pick-img');
+    }
+
+    function pickRowNode(it) {
+      const on = !!pickedMeta && pickedMeta.tmdb_id === it.tmdb_id;
+      const row = el('div', 'pts-pick-row' + (on ? ' on' : ''));
+      row.append(posterThumb(it));
+      const t = el('div', 'pts-pick-t');
+      t.append(el('b', '', it.meta_title || ''));
+      t.append(el('div', 'pts-pick-m', metaLine(it)));
+      row.append(t);
+      const pill = animPill(it);
+      if (pill) row.append(pill);
+      if (on) row.append(el('span', 'pts-pill ok', '已选'));
+      row.title = on ? '当前已选；点「收起」把它折起来' : '点这一行就用这个 TMDB 作品';
+      row.addEventListener('click', () => {
+        pickedMeta = it;
+        if (it.kind && it.kind !== segKind.get()) {
+          segKind.set(it.kind);
+          applyKind();
+        }
+        pickOpen = false;   // 选完就收起，只留一行摘要
+        paintPick();
+        sync();
+      });
+      return row;
+    }
+
+    // 收起态：一行摘要 + 「更换」，点哪儿都能重新展开
+    function paintPicked() {
+      const it = pickedMeta;
+      const row = el('div', 'pts-pick-min');
+      row.title = '点一下展开候选，换别的同名作品';
+      row.append(posterThumb(it));
+      const t = el('div', 'pts-pick-t');
+      t.append(el('b', '', it.meta_title || fName.value.trim()));
+      t.append(el('div', 'pts-pick-m', metaLine(it)));
+      row.append(t);
+      const pill = animPill(it);
+      if (pill) row.append(pill);
+      const swap = el('span', 'pts-pick-swap');
+      swap.append(iconEl('search', 12), el('span', '', pickRows.length > 1 ? '更换（' + pickRows.length + '）' : '更换'));
+      row.append(swap);
+      row.addEventListener('click', openPick);
+      pickBox.append(row);
+    }
+
+    function openPick() {
+      pickOpen = true;
+      paintPick();
+      // 编辑时后台只拉回当前关联那条，重新拉一次才有全部同名
+      if (pickRows.length <= 1) lookup(pickedMeta && pickedMeta.tmdb_id);
+    }
+
+    function paintPick() {
       pickBox.innerHTML = '';
+      if (pickLoading) {
+        pickBox.className = 'pts-pick';
+        pickBox.style.display = '';
+        const head = el('div', 'pts-pick-h');
+        head.append(iconEl('search', 13), el('span', '', '正在 TMDB 识别「' + fName.value.trim() + '」…'));
+        pickBox.append(head);
+        return;
+      }
+      if (!pickedMeta && !pickRows.length) { pickBox.style.display = 'none'; return; }
       pickBox.style.display = '';
-      pickCount = rows.length;
+      pickBox.className = 'pts-pick' + (pickOpen ? '' : ' min');
+      if (!pickOpen && pickedMeta) { paintPicked(); return; }
+
       const head = el('div', 'pts-pick-h');
-      head.append(iconEl('search', 13), el('span', '', note || ''));
+      const txt = el('span', '', pickNoteText || '');
+      txt.style.flex = '1';
+      txt.style.minWidth = '0';
+      head.append(iconEl('search', 13), txt);
+      const fold = el('button', 'pts-pick-collapse', '收起');
+      fold.type = 'button';
+      fold.title = '收起候选，只留已选那一条';
+      fold.addEventListener('click', (e) => {
+        e.stopPropagation();
+        pickOpen = false;
+        paintPick();
+      });
+      head.append(fold);
       pickBox.append(head);
-      if (!rows.length) {
+
+      if (!pickRows.length) {
         const empty = el('div', 'pts-pick-row');
         empty.append(el('div', 'pts-pick-t', '没有匹配到作品，先照名字保存也行；之后卡片上点「同步海报」可以重试'));
         pickBox.append(empty);
         return;
       }
-      for (const it of rows) {
-        const on = pickedMeta && pickedMeta.tmdb_id === it.tmdb_id;
-        const row = el('div', 'pts-pick-row' + (on ? ' on' : ''));
-        if (it.poster_url) {
-          const im = el('img', 'pts-pick-img');
-          im.src = it.poster_url;
-          im.alt = '';
-          im.loading = 'lazy';
-          im.addEventListener('error', () => im.remove());
-          row.append(im);
-        } else {
-          row.append(el('div', 'pts-pick-img'));
-        }
-        const t = el('div', 'pts-pick-t');
-        t.append(el('b', '', it.meta_title || ''));
-        t.append(el('div', 'pts-pick-m', metaLine(it)));
-        row.append(t);
-        if (it.kind !== 'movie' || it.is_anim) {
-          row.append(el('span', 'pts-pill ' + (it.is_anim ? 'anim' : 'real'), it.is_anim ? '动画' : '真人'));
-        }
-        if (on) row.append(el('span', 'pts-pill ok', '已选'));
-        row.title = '点这一行就用这个 TMDB 作品';
-        row.addEventListener('click', () => {
-          pickedMeta = it;
-          if (it.kind && it.kind !== segKind.get()) {
-            segKind.set(it.kind);
-            applyKind();
-          }
-          renderPick(rows, '已锁定「' + (it.meta_title || '') + '」' + metaLine(it) + '；点其它行可切换');
-          sync();
-        });
-        pickBox.append(row);
-      }
+      for (const it of pickRows) pickBox.append(pickRowNode(it));
     }
 
     async function lookup(preferId) {
       const q = fName.value.trim();
       pickSeq += 1;
       const seq = pickSeq;
-      if (!q) { pickBox.style.display = 'none'; pickedMeta = null; pickCount = 0; sync(); return; }
-      pickBox.style.display = '';
-      pickBox.innerHTML = '';
-      const head = el('div', 'pts-pick-h');
-      head.append(iconEl('search', 13), el('span', '', '正在 TMDB 识别「' + q + '」…'));
-      pickBox.append(head);
+      if (!q) {
+        pickBox.style.display = 'none';
+        pickedMeta = null; pickRows = []; pickCount = 0; pickOpen = false; pickLoading = false;
+        sync();
+        return;
+      }
+      pickLoading = true;
+      paintPick();
       try {
         const r = await call('GET', 'meta/search?name=' + encodeURIComponent(q)
           + '&kind=' + encodeURIComponent(segKind.get()));
         if (seq !== pickSeq) return;
         const items = r.items || [];
+        pickLoading = false;
+        pickRows = items;
+        pickCount = items.length;
         if (!items.length) {
           pickedMeta = null;
-          renderPick([], r.message || 'TMDB 没找到同名作品');
+          pickNoteText = r.message || 'TMDB 没找到同名作品';
+          pickOpen = true;
+          paintPick();
           sync();
           return;
         }
@@ -852,23 +937,29 @@ export function mountUI(root, api) {
         const want = preferId || (pickedMeta && pickedMeta.tmdb_id) || 0;
         const hit = items.filter((x) => x.tmdb_id === want)[0];
         pickedMeta = hit || items[0];
-        renderPick(items, hit
-          ? '当前已选「' + (hit.meta_title || '') + '」' + metaLine(hit) + '；点其它行可切换'
-          : pickNote(items));
+        pickNoteText = hit
+          ? '当前已选「' + (hit.meta_title || '') + '」' + metaLine(hit) + '；点其它行切换'
+          : pickNote(items);
+        paintPick();
         sync();
       } catch (e) {
+        pickLoading = false;
         if (seq === pickSeq) pickBox.style.display = 'none';
       }
     }
 
     function lookupSoon() {
+      pickOpen = true;   // 改名字/切类型意味着要重新选，先展开
       clearTimeout(pickTimer);
       pickTimer = setTimeout(lookup, 650);
     }
     fName.addEventListener('input', lookupSoon);
-    // 编辑已有订阅：立刻把该名字下的全部候选拉出来，当前关联的标「已选」，可直接换
+    // 编辑已有订阅：先收起成一行（不挡后面的站点选择），后台把同名候选拉回来
     if (pickedMeta) {
-      renderPick([pickedMeta], '当前已关联 TMDB，正在拉同名候选…');
+      pickRows = [pickedMeta];
+      pickOpen = false;
+      pickNoteText = '当前已关联 TMDB，正在拉同名候选…';
+      paintPick();
       setTimeout(() => lookup(pickedMeta.tmdb_id), 80);
     }
     mainCol.append(sec1);
@@ -1057,7 +1148,7 @@ export function mountUI(root, api) {
         sum.tmdb.textContent = bits.join(' · ');
         sum.tmdb.className = '';
         sum.tmdbRow.title = pickCount > 1
-          ? 'TMDB 里还有 ' + (pickCount - 1) + ' 个同名作品，认错就在上方列表里点别的'
+          ? 'TMDB 里还有 ' + (pickCount - 1) + ' 个同名作品，认错就点上面那行的「更换」挑'
           : '已按 TMDB 条目锁定海报与总集数';
       } else {
         sum.tmdb.textContent = fName.value.trim() ? '未关联，按名字搜' : '—';

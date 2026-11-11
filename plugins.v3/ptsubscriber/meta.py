@@ -15,7 +15,7 @@ IMAGE_BASE = "https://image.tmdb.org/t/p/w500"
 
 # 落库的元数据字段（upsert 时沿用旧值，避免编辑一次就丢海报）
 META_KEYS = ("tmdb_id", "meta_title", "year", "poster_path",
-             "total_eps", "season_eps", "seasons", "meta_at")
+             "total_eps", "season_eps", "seasons", "genres", "is_anim", "meta_at")
 
 
 def clean_seasons(raw: Any) -> list[dict]:
