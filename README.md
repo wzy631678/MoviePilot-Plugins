@@ -22,19 +22,35 @@ MoviePilot v3 插件：按你设定的「每周几 / 几点」，自动到指定
 
 ### 方式一：插件市场添加仓库（推荐，可跟随更新）
 
-1. MoviePilot → 设置 → 插件市场 → 添加仓库，填本仓库地址：
+1. MoviePilot → 插件市场 → 右侧筛选面板 → 仓库 → 填本仓库地址：
    `https://github.com/wzy631678/MoviePilot-Plugins`
-2. 在插件市场里找到「定时订阅下载」，点击安装
-3. 安装后到「插件」页打开，即可使用
+2. 刷新插件市场，搜索「定时订阅下载」，点击安装
+3. 安装后到「我的插件」打开，即可使用
 
-> 国内网络无法直连 GitHub 时，可在仓库地址前加加速前缀，例如：
-> `https://gh-proxy.com/https://github.com/wzy631678/MoviePilot-Plugins`
+> ⚠️ 仓库地址必须是标准 GitHub 地址，**不要**在前面加 `gh-proxy.com/` 之类的加速前缀。
+> MoviePilot 需要从地址里解析 `用户/仓库名`，加了前缀会解析成 `github.com/wzy631678`，索引直接 404。
+> 国内无法直连时，请改在「设置 → 系统 → GitHub 代理」填加速地址，或给 MoviePilot 配置 HTTP 代理。
+
+> 说明：已经安装的插件不会在市场里重复出现（市场只列未安装、或有新版本的插件），
+> 这是 MoviePilot 的既定逻辑，不是没发布成功。卸载后会重新出现在市场列表。
 
 ### 方式二：本地安装
 
-1. 下载本仓库 `ptsubscriber` 目录，压缩成 `ptsubscriber.zip`（zip 根目录必须是 `ptsubscriber/`，不要多套一层文件夹）
+1. 下载本仓库 Release 中的 `ptsubscriber_v*.zip`，或把 `plugins.v3/ptsubscriber/` 目录压成 zip（zip 根目录直接是 `__init__.py`、`dist/`，不要多套一层文件夹）
 2. MoviePilot → 插件 → 本地安装，上传该 zip
 3. 若安装后没出现在列表里，重启一次 MoviePilot 容器即可
+
+### 仓库结构（给其他插件作者参考）
+
+```
+package.v3.json              # v3 市场索引（MoviePilot v3 首选读这个）
+package.json                 # v1 索引兜底，条目需声明 "v3": true
+icon.png                     # 插件图标
+plugins.v3/ptsubscriber/     # 插件源码（目录名为插件 ID 小写）
+```
+
+发布 Release 时：tag 必须是 `PtSubscriber_v{版本号}`，资产名必须是 `ptsubscriber_v{版本号}.zip`，
+zip 内直接是插件文件；索引条目声明 `"release": true` 后，MoviePilot 会优先用 Release 包安装。
 
 ## 使用
 
