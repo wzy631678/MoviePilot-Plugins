@@ -221,9 +221,9 @@ def _search_rows(name: str, kind: str, limit: int, *, with_detail: bool) -> list
                 "kind": "series" if mtype == "tv" else "movie",
                 "meta_title": detail.get("meta_title") or "",
                 "year": detail.get("year") or "",
-                # 不查图片：QQ / 微信纯文本渠道用不上海报，省一轮图片地址拼装
-                "poster_path": "",
-                "poster_url": "",
+                # 快查（QQ / 微信纯文本）不拼图片地址，前端候选列表仍要给海报
+                "poster_path": (detail.get("poster_path") or "") if with_detail else "",
+                "poster_url": poster_url(detail.get("poster_path")) if with_detail else "",
                 "total_eps": int(detail.get("total_eps") or 0),
                 "season_count": len(seasons),
                 "seasons": seasons,
