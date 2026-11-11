@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import Body
@@ -18,7 +19,7 @@ except ImportError:  # 兼容旧版宿主
 
     logger = logging.getLogger("PtSubscriber")
 
-from . import remote, remote_ui
+from . import intercept, remote, remote_ui
 from .core import Store, filter_candidates
 from .meta import poster_url as meta_poster_url
 from .meta import resolve as resolve_meta
@@ -92,8 +93,8 @@ def build_trigger(sub: dict, tz: str):
 
 class PtSubscriber(_PluginBase):
     plugin_name = "定时订阅下载"
-    plugin_desc = "自己选周几几点，到指定站点搜资源并按详细规则下载到指定容器；自动对接 TMDB，搜到的资源会按片名、年份、剧集/电影、集数逐项比对，只把真正这部排在最前。支持智能助手和 QQ 等远程入口：/ptsub 片名 建订阅（可带 从N集 / 站点X / 每天3:00 / 立即），/ptfind 片名 只找资源直接下，/ptlist 看订阅进度；回复全是纯文本不带图，QQ 里回个序号就行。"
-    plugin_version = "1.4.2"
+    plugin_desc = "自己选周几几点，到指定站点搜资源并按详细规则下载到指定容器；自动对接 TMDB，按片名、年份、剧集/电影、集数逐项比对，只把真正这部排在最前。聊天入口不用打斜杠：直接说「订阅 天才女友」就列同名作品，回序号后选「从第几集 / 哪些站 / 多久刷一次」，回「确定」立刻补搜；「找资源 仙逆」只搜一轮直接下，不建订阅。斜杠命令 /ptsub、/ptfind、/ptlist 一样可用；回复全是纯文本不带图。"
+    plugin_version = "1.5.0"
     plugin_author = "wzy"
     plugin_config_prefix = "ptsubscriber_"
     plugin_order = 90
@@ -129,6 +130,13 @@ class PtSubscriber(_PluginBase):
         if not self._enabled:
             return
         self._self_check()
+        # 接管聊天渠道里的普通中文消息（「订阅 X」「1」），否则会被 MP 原生订阅链抢先
+        try:
+            ok = intercept.install(self.remote_intercept_text)
+            logger.info(f"[{self.plugin_name}] 聊天文本接管："
+                        + ("已启用（订阅 / 找资源 / 回序号都由插件处理）" if ok else "未启用"))
+        except Exception as exc:  # noqa: BLE001 - 接管失败也要能正常用斜杠命令
+            logger.warning(f"[{self.plugin_name}] 聊天文本接管失败：{type(exc).__name__}: {exc}")
         try:
             from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -159,6 +167,10 @@ class PtSubscriber(_PluginBase):
         logger.info(f"[{self.plugin_name}] 数据源自检：" + "；".join(parts))
 
     def stop_service(self) -> None:
+        try:
+            intercept.uninstall()
+        except Exception:  # noqa: BLE001 - 还原失败不影响停服
+            pass
         if self._scheduler:
             try:
                 self._scheduler.shutdown(wait=False)
@@ -810,12 +822,128 @@ class PtSubscriber(_PluginBase):
         except Exception as exc:
             logger.warning(f"[{self.plugin_name}] 远程回复发送失败：{type(exc).__name__}: {exc}")
 
+    # ------------------------------------------- 接管聊天渠道的普通文本（不带斜杠）
+    def remote_intercept_text(self, channel=None, source=None, userid=None,
+                              username: str = "", text: str = "") -> bool:
+        """聊天渠道里的普通中文先给插件一次机会，返回 True 表示这条已处理。
+
+        要接管的三类（都是 QQ 里最常见的说法）：
+
+        - 「订阅 天才女友」「找资源 仙逆」：不用打斜杠，直接进插件流程
+        - 列完候选后回「1」「1-3」：进第二屏选集数 / 站点 / 刷新时间
+        - 第二屏里回「从5集」「站点馒头」「每30分钟」「确定」
+
+        其余聊天内容返回 False，原样交给宿主处理，行为与没装插件时一致。
+        """
+        raw = str(text or "").strip()
+        if not raw or raw.startswith("/"):
+            return False
+        key = self._remote_key(channel, source, userid)
+        self._pending_prune()
+
+        # 刚搜完资源，用户回「订阅」= 把这部改成追更，不能当成新一次订阅查询
+        if self._pending_dl.get(key) and raw in ("订阅", "订阅它", "订阅这个", "追更", "改订阅"):
+            self._remote_post(channel, source, userid, self.remote_dl_subscribe(key=key))
+            return True
+
+        kind, rest = remote_ui.split_intent(raw)
+        if kind:
+            if not rest:
+                self._remote_post(channel, source, userid, remote_ui.render_intent_hint(kind))
+                return True
+            text_out = (self.remote_find(rest, key=key) if kind == "find"
+                        else self.remote_sub(rest, key=key))
+            self._remote_post(channel, source, userid, text_out)
+            return True
+
+        pending = self._pending.get(key)
+        if pending:
+            text_out = self._intercept_pending(pending, key, raw)
+            if text_out is None:
+                return False
+            self._remote_post(channel, source, userid, text_out)
+            return True
+
+        dl = self._pending_dl.get(key)
+        if dl:
+            text_out = self._intercept_dl(dl, key, raw)
+            if text_out is None:
+                return False
+            self._remote_post(channel, source, userid, text_out)
+            return True
+        return False
+
+    _CANCEL_WORDS = ("退出", "取消", "算了", "不了", "不要了", "q", "Q", "quit", "exit")
+
+    def _intercept_pending(self, pending: Dict[str, Any], key: str,
+                           raw: str) -> Optional[str]:
+        """订阅流程里的第二/三步；返回 None 表示这条不该插件管。"""
+        if raw in self._CANCEL_WORDS:
+            self._pending.pop(key, None)
+            return "已取消这次选择。要重来就发「订阅 片名」。"
+        if pending.get("stage") == "opts":
+            if remote_ui.is_confirm(raw):
+                return self.remote_confirm(key)
+            intent = remote_ui.parse_intent(raw)
+            known = any(intent.get(f) for f in (
+                "ep_start", "ep_end", "sites", "schedule_mode", "pick"))
+            if intent.get("name") and not known:
+                return None  # 用户改主意说了别的片名，交给上层重新搜
+            # 第二屏里又回了个数字 → 当成重选作品
+            return self.remote_opt(raw, key=key)
+        cands = pending.get("candidates") or []
+        picks = remote_ui.pick_rows(raw, len(cands), multi=False)
+        if picks:
+            return self.remote_pick(picks[0], key=key)
+        # 「1 从5集 站点馒头」：序号 + 参数一条带全，直接建，省掉第二屏
+        m = re.match(r"^(\d{1,3})\s*([^\d\-~—,，].*)$", raw)
+        if m:
+            idx = int(m.group(1))
+            if 1 <= idx <= len(cands):
+                return self.remote_pick(idx, key=key,
+                                        opts=remote_ui.parse_intent(m.group(2)))
+        intent = remote_ui.parse_intent(raw)
+        if any(intent.get(f) for f in ("ep_start", "ep_end", "sites", "schedule_mode")):
+            return f"先回序号告诉我要哪一部（1 ~ {len(cands)}），再说集数和站点。"
+        return None
+
+    def _intercept_dl(self, pending: Dict[str, Any], key: str,
+                      raw: str) -> Optional[str]:
+        """找资源流程里的回序号 / 转订阅；返回 None 表示这条不该插件管。"""
+        if raw in self._CANCEL_WORDS:
+            self._pending_dl.pop(key, None)
+            return "已取消这次下载选择。要重搜就发「找资源 片名」。"
+        if raw in ("订阅", "订阅它", "订阅这个", "追更", "改订阅"):
+            return self.remote_dl_subscribe(key=key)
+        rows = pending.get("rows") or []
+        if remote_ui.pick_rows(raw, len(rows), multi=True):
+            return self.remote_dl_pick(raw, key=key)
+        return None
+
+    def _site_total(self) -> int:
+        """可搜索站点数，用于第二屏写「全部 N 个可搜站」。"""
+        try:
+            return len(self._default_sites())
+        except Exception:  # noqa: BLE001
+            return 0
+
+    @staticmethod
+    def _default_plan_text() -> str:
+        """新订阅的默认刷新计划（模型默认每天 03:00）。"""
+        return "每天 03:00"
+
     # ------------------------------------------------------------------ /ptsub
     def remote_sub(self, arg: str, key: str = "") -> str:
         """`/ptsub ...` 的调度：选候选 / 列站点 / 看帮助 / 带参数建订阅。"""
         text = str(arg or "").strip()
         if text.lower() in ("help", "?", "？", "帮助", "用法"):
             return remote_ui.render_help()
+        # 已经有待选/待定状态：这条消息就是那一步的回答（序号 / 参数 / 确定）
+        pending = self._pending.get(key)
+        if pending:
+            handled = self._intercept_pending(pending, key, text)
+            if handled is not None:
+                return handled
         intent = remote_ui.parse_intent(text)
         if intent.get("list_sites") and not intent.get("name"):
             return self._remote_sites_text()
@@ -857,6 +985,17 @@ class PtSubscriber(_PluginBase):
             sub = self._remote_create(name, want_kind, None, opts)
             return ("TMDB 没找到同名作品，已直接建订阅「%s」（按%s）。\n%s"
                     % (name, self._kind_label(want_kind), self._remote_confirmed(sub, opts)))
+        # 只认出一部、且用户没带任何参数时，也走「选集数/站点/刷新时间」那一屏：
+        # 订阅本来就要定这些，别替用户默默按默认建。
+        if len(cands) == 1 and not self._has_explicit_opts(opts):
+            c = cands[0]
+            self._pending[key] = {
+                "name": name, "kind": c["kind"], "candidates": cands,
+                "chosen": c, "opts": opts, "stage": "opts", "at": self._now_ts(),
+            }
+            return remote_ui.render_pick_menu(
+                c, opts=opts, site_total=self._site_total(),
+                plan_text=self._default_plan_text())
         if len(cands) == 1:
             c = cands[0]
             sub = self._remote_create(name, c["kind"], c["tmdb_id"], opts)
@@ -869,12 +1008,20 @@ class PtSubscriber(_PluginBase):
         return f"{head}\n{extra}" if extra else head
 
     def remote_pick(self, pick, key: str = "",
-                    opts: Optional[Dict[str, Any]] = None) -> str:
-        """第二步：用户回了序号，按候选建订阅（同一条消息里的参数照旧生效）。"""
+                    opts: Optional[Dict[str, Any]] = None,
+                    ask: bool = True) -> str:
+        """第二步：用户回了序号。
+
+        什么参数都没带时先**不建订阅**，而是进入第二屏让用户选
+        「从第几集开始 / 用哪些站 / 多久刷一次」——这正是用户要的
+        「回 1 → 跳出去选集数和订阅时间」。
+        如果用户在同一条消息里带了参数（「1 从5集 站点馒头 每天3:00」），
+        就直接按参数建，省一轮。
+        """
         self._pending_prune()
         pending = self._pending.get(key)
         if not pending:
-            return "没有进行中的选择。先发 /ptsub 片名，我列同名作品给你选。"
+            return remote_ui.render_no_choice()
         try:
             idx = int(pick)
         except (TypeError, ValueError):
@@ -895,10 +1042,83 @@ class PtSubscriber(_PluginBase):
             if msg:
                 return msg
             merged.update(extra)
+        explicit = self._has_explicit_opts(merged)
+        if ask and not explicit:
+            # 进入「选集数 / 站点 / 刷新时间」这一屏
+            self._pending[key] = {
+                "name": pending.get("name") or c["title"],
+                "kind": c["kind"],
+                "candidates": cands,
+                "chosen": c,
+                "opts": merged,
+                "stage": "opts",
+                "at": self._now_ts(),
+            }
+            return remote_ui.render_pick_menu(
+                c, opts=merged, site_total=self._site_total(),
+                plan_text=self._default_plan_text())
         self._pending.pop(key, None)
         sub = self._remote_create(pending.get("name") or c["title"], c["kind"],
                                   c["tmdb_id"], merged)
         return self._remote_confirmed(sub, merged)
+
+    def remote_opt(self, text: str, key: str = "") -> str:
+        """第二屏里改一项：集数 / 站点 / 刷新时间，累加到待建参数上。"""
+        self._pending_prune()
+        pending = self._pending.get(key)
+        if not pending or pending.get("stage") != "opts":
+            return remote_ui.render_no_choice()
+        intent = remote_ui.parse_intent(text)
+        merged = dict(pending.get("opts") or {})
+        cands = pending.get("candidates") or []
+        # 顺手允许重选候选（如「3」）
+        if intent.get("pick") is not None and not intent.get("name"):
+            idx = int(intent["pick"])
+            if idx < 1 or idx > len(cands):
+                return f"序号超出范围（1 ~ {len(cands)}）。"
+            pending["chosen"] = cands[idx - 1]
+        before = dict(merged)
+        for field in ("ep_start", "ep_end", "season", "schedule_mode",
+                      "schedule_time", "schedule_interval", "schedule_weekday"):
+            value = intent.get(field)
+            if value not in (None, "", [], 0):
+                merged[field] = value
+        if intent.get("run_now"):
+            merged["run_now"] = True
+        if intent.get("sites"):
+            extra, msg = self._resolve_sites_or_msg(intent["sites"])
+            if msg:
+                return msg
+            merged.update(extra)
+            merged["site_names"] = self._site_names(merged.get("site_ids") or [])
+        if merged == before and pending.get("chosen") is not None and not intent.get("pick"):
+            return ("没看出要改哪一项。回「从5集」「站点馒头」「每天3:00」「每30分钟」"
+                    "这类，或回「确定」直接建。\n"
+                    + remote_ui.render_pick_menu(
+                        pending.get("chosen") or {}, opts=merged,
+                        site_total=self._site_total(), plan_text=self._default_plan_text()))
+        pending["opts"] = merged
+        pending["at"] = self._now_ts()
+        self._pending[key] = pending
+        return remote_ui.render_opts_state(
+            pending.get("chosen") or {}, opts=merged,
+            site_total=self._site_total(), plan_text=self._default_plan_text())
+
+    def remote_confirm(self, key: str = "") -> str:
+        """第二屏里回「确定」：按当前设置建订阅并立刻补搜一轮。"""
+        self._pending_prune()
+        pending = self._pending.get(key)
+        if not pending or pending.get("stage") != "opts":
+            return remote_ui.render_no_choice()
+        chosen = pending.get("chosen") or {}
+        opts = dict(pending.get("opts") or {})
+        opts["run_now"] = True
+        self._pending.pop(key, None)
+        sub = self._remote_create(
+            pending.get("name") or chosen.get("title") or "",
+            chosen.get("kind") or pending.get("kind") or "series",
+            chosen.get("tmdb_id"), opts)
+        return self._remote_confirmed(sub, opts)
 
     @staticmethod
     def _brief_candidates(items: List[dict], name: str, kind: str) -> List[dict]:
@@ -920,6 +1140,15 @@ class PtSubscriber(_PluginBase):
                 "overview": str(it.get("overview") or ""),
             })
         return cands
+
+    @staticmethod
+    def _has_explicit_opts(opts: Optional[Dict[str, Any]]) -> bool:
+        """用户是否已经明确指定了集数 / 站点 / 刷新计划中的任意一项。"""
+        opts = dict(opts or {})
+        return any(opts.get(f) for f in (
+            "ep_start", "ep_end", "season", "site_ids",
+            "schedule_mode", "schedule_interval", "run_now",
+        ))
 
     @staticmethod
     def _opts_hint(opts: Dict[str, Any]) -> str:
