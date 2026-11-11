@@ -64,7 +64,7 @@ def build_trigger(sub: dict, tz: str):
 class PtSubscriber(_PluginBase):
     plugin_name = "定时订阅下载"
     plugin_desc = "自己选周几几点，到指定站点搜资源并按详细规则下载到指定容器；站点与下载器直接取自 MoviePilot。"
-    plugin_version = "1.0.6"
+    plugin_version = "1.0.7"
     plugin_author = "WorkBuddy"
     plugin_config_prefix = "ptsubscriber_"
     plugin_order = 90

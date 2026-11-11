@@ -114,8 +114,11 @@ const CSS = `
 .pts-sum-row>span{color:var(--muted);flex:none}
 .pts-sum-row>b{font-weight:650;text-align:right;word-break:break-word;max-width:172px}
 .pts-sum-row>b.warn{color:var(--danger);font-weight:600}
-.pts-err{color:var(--danger);font-size:12.6px;margin:0 0 10px;white-space:pre-wrap;display:none}
-.pts-err.on{display:block}
+.pts-err{color:var(--danger);font-size:13.2px;font-weight:650;margin:0 0 10px;white-space:pre-wrap;display:none}
+.pts-err.on{display:block;animation:ptsShake .4s ease}
+.pts-err.on::before{content:'⚠ '}
+@keyframes ptsShake{0%,100%{transform:translateX(0)}25%{transform:translateX(-5px)}75%{transform:translateX(5px)}}
+.pts-picker.flash{outline:2px solid var(--danger);outline-offset:2px;border-radius:12px}
 .pts-table{width:100%;border-collapse:separate;border-spacing:0;font-size:12.4px}
 .pts-table th{text-align:left;font-weight:650;color:var(--muted);padding:9px 12px;border-bottom:1px solid var(--line);white-space:nowrap;background:var(--sur2)}
 .pts-table td{padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top;word-break:break-word}
@@ -866,15 +869,27 @@ export function mountUI(root, api) {
         notify: tglNotify.get(),
         enabled: tglEnabled.get(),
       };
-      if (!payload.name) {
-        err.textContent = '请填写订阅名称（同时作为搜索关键词）';
+      // 校验失败要让用户一定看见：滚动到错误条并抖动；站点没勾时把站点框标红
+      const showErr = (msg, target) => {
+        err.textContent = msg;
+        err.classList.remove('on');
+        void err.offsetWidth;  // 重置动画
         err.classList.add('on');
+        err.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        if (target) {
+          target.classList.remove('flash');
+          void target.offsetWidth;
+          target.classList.add('flash');
+          setTimeout(() => target.classList.remove('flash'), 2500);
+        }
+      };
+      if (!payload.name) {
+        showErr('请填写订阅名称（同时作为搜索关键词）', fName);
         fName.focus();
         return;
       }
       if (!payload.site_ids.length) {
-        err.textContent = '请至少勾选一个站点';
-        err.classList.add('on');
+        showErr('还没勾选站点：请在下方站点列表至少勾 1 个，再点保存', picker.node);
         return;
       }
       const btn = thenRun ? btnRun : btnSave;
@@ -885,8 +900,7 @@ export function mountUI(root, api) {
       try {
         const r = await call('POST', 'sub', payload);
         if (!r.ok) {
-          err.textContent = r.message || '保存失败';
-          err.classList.add('on');
+          showErr(r.message || '保存失败');
           return;
         }
         const savedId = (r.item || {}).id || payload.id;
@@ -906,8 +920,7 @@ export function mountUI(root, api) {
             + (last.target ? '\n本轮目标：' + last.target : '')
           : '已保存，但执行失败：' + (rr.message || '未知错误'));
       } catch (e) {
-        err.textContent = String(e && e.message ? e.message : e);
-        err.classList.add('on');
+        showErr(String(e && e.message ? e.message : e));
       } finally {
         btnSave.disabled = btnRun.disabled = false;
         label.textContent = old;
