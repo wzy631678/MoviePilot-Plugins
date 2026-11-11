@@ -1,5 +1,5 @@
 /* PtSubscriber 插件页面：原生 DOM，无构建工具，宿主注入的 api 负责鉴权。 */
-const UI_VERSION = '1.2.2';
+const UI_VERSION = '1.2.3';
 const CSS = `
 .pts-root,.pts-ov{--acc:#8b5cf6;--acc2:#a78bfa;--sur:#ffffff;--sur2:#f7f7fb;--sur3:#eeeef6;--on:#1f2230;--muted:rgba(31,34,48,.58);--line:rgba(17,24,39,.1);--soft:rgba(139,92,246,.12);--danger:#dc2626;--ok:#16a34a;--warn:#b45309}
 .pts-dark{--sur:#1b1e26;--sur2:#232733;--sur3:#2b3040;--on:#e9ebf2;--muted:rgba(233,235,242,.6);--line:rgba(255,255,255,.12);--soft:rgba(139,92,246,.22);--danger:#f87171;--ok:#4ade80;--warn:#fbbf24}
@@ -23,6 +23,7 @@ const CSS = `
 .pts-banner{display:flex;gap:9px;align-items:flex-start;border-radius:12px;padding:11px 14px;font-size:12.8px;margin-bottom:14px;border:1px solid rgba(245,158,11,.4);background:rgba(245,158,11,.1);color:var(--warn);line-height:1.6}
 .pts-banner .pts-ico{flex:none;margin-top:2px}
 .pts-banner.bad{border-color:rgba(220,38,38,.35);background:rgba(220,38,38,.09);color:var(--danger)}
+.pts-banner.info{border-color:rgba(139,92,246,.35);background:var(--soft);color:var(--acc)}
 .pts-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
 .pts-btn{border:1px solid var(--line);background:var(--sur);color:var(--on);border-radius:10px;padding:7px 14px;cursor:pointer;font-size:13px;font-family:inherit;font-weight:500;transition:.15s;display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
 .pts-btn:hover{border-color:rgba(139,92,246,.5);color:var(--acc);background:var(--soft)}
@@ -228,6 +229,16 @@ function el(tag, cls, text) {
   if (cls) node.className = cls;
   if (text !== undefined && text !== null) node.textContent = String(text);
   return node;
+}
+
+// 正则元字符转义，用于把认准作品名拼进匹配正则
+function escapeRe(text) {
+  return String(text || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// 片名「骨架」：去空格与常见分隔符、小写，用来判断两个名字是否同一个
+function skeleton(text) {
+  return String(text || '').replace(/[\s··\-_.()\[\]{}【】（）:：]+/g, '').toLowerCase();
 }
 
 function iconEl(name, size) {
@@ -456,8 +467,10 @@ function createMetaPicker(cfg) {
       onPick(null, true);
       return;
     }
-    // 编辑已有订阅时保住原来那条；否则默认第 1 个（类型与当前选择一致的排在前面）
-    const want = preferId || (picked && picked.tmdb_id) || 0;
+    // 编辑已有订阅时保住原来那条；输入改了（与新名字不再是同一个）就按新候选重新选
+    const keepOld = picked && picked.tmdb_id
+      && (!preferId ? skeleton(picked.meta_title) === skeleton(q) : true);
+    const want = preferId || (keepOld ? picked.tmdb_id : 0);
     const hit = items.filter((x) => x.tmdb_id === want)[0];
     picked = hit || items[0];
     note = hit
@@ -545,6 +558,7 @@ export function mountUI(root, api) {
   const state = {
     options: null, subs: [], logs: [], hits: [],
     result: null, selected: new Set(), probe: null, tab: 'subs', prefix: null,
+    searchedMeta: null,   // 找资源页：搜索时 TMDB 认准的作品（用于给结果标注是否对得上）
   };
   let activeOverlay = null;
 
@@ -1488,6 +1502,12 @@ export function mountUI(root, api) {
       btnSearch.disabled = true;
       status.textContent = '正在到站点搜索…';
       try {
+        // 记录搜索时 TMDB 认准的作品，结果卡片据此标注「对得上 / 同名其它」
+        const mk = metaPicker.current;
+        state.searchedMeta = mk ? {
+          title: mk.meta_title || '', year: mk.year || '', kind: mk.kind,
+          is_anim: mk.is_anim, total_eps: mk.total_eps,
+        } : null;
         const r = await call('POST', 'search', {
           keyword: fKeyword.value.trim(), domains, preview: true,
         });
@@ -1528,6 +1548,20 @@ export function mountUI(root, api) {
     actionBar.append(status);
     p.append(actionBar, resultBox);
 
+    // 判断一条结果是否对得上搜索时 TMDB 认准的作品。
+    // 返回 'ok'（标题里的确是这个作品）/ 'other'（含同名但其实是别的）/ null（没法判断）。
+    // 「天下第一」后面直接跟中文（如「天下第一良配」）视为同名其它，不是认准那部。
+    function metaMatchState(item) {
+      const meta = state.searchedMeta;
+      if (!meta || !meta.title) return null;
+      const hay = [item.title, item.display_title, item.original_title].filter(Boolean).join(' | ');
+      if (!hay) return null;
+      const exact = new RegExp(escapeRe(meta.title) + '(?![\\u4e00-\\u9fff])');
+      if (exact.test(hay)) return 'ok';
+      if (hay.indexOf(meta.title) !== -1) return 'other';
+      return null;
+    }
+
     function drawResults() {
       resultBox.innerHTML = '';
       if (!state.result) return;
@@ -1540,6 +1574,26 @@ export function mountUI(root, api) {
       if (!state.result.items.length) {
         resultBox.append(el('div', 'pts-empty', '没有搜到资源。可换个关键词，或确认 MP 站点已启用且有搜索索引。'));
         return;
+      }
+      // 认准作品提示条：让用户一眼看出「按哪部在搜」以及结果对不对得上
+      const meta = state.searchedMeta;
+      if (meta && meta.title) {
+        const okCount = state.result.items.filter((it) => metaMatchState(it) === 'ok').length;
+        const line = el('div', 'pts-banner info');
+        line.append(iconEl('search', 15));
+        const txt = el('div');
+        txt.style.flex = '1';
+        txt.style.minWidth = '0';
+        const head = el('b', '', `按 TMDB 认准的《${meta.title}》${meta.year ? '（' + meta.year + '）' : ''} 搜索`);
+        head.style.display = 'block';
+        const body = el('span', '', okCount > 0
+          ? `这 ${state.result.items.length} 条里，有 ${okCount} 条对得上这部；同名其它剧已标「同名其它」，别下错。`
+          : `这 ${state.result.items.length} 条里没有一部对得上这部——下面多半是同名其它剧，先核对再勾选。`);
+        body.style.fontSize = '12px';
+        body.style.opacity = '.85';
+        txt.append(head, body);
+        line.append(txt);
+        resultBox.append(line);
       }
       const grid = el('div', 'pts-grid');
       for (const item of state.result.items) grid.append(resultCard(item));
@@ -1562,6 +1616,9 @@ export function mountUI(root, api) {
       for (const b of item.badges || []) badges.append(el('span', 'pts-badge', b));
       if (item.reason) badges.append(el('span', 'pts-badge warn', item.reason));
       else badges.append(el('span', 'pts-badge ok', '符合规则'));
+      const ms = metaMatchState(item);
+      if (ms === 'ok') badges.append(el('span', 'pts-badge ok', '✓ 匹配认准作品'));
+      else if (ms === 'other') badges.append(el('span', 'pts-badge warn', '同名其它'));
       main.append(badges);
       const meta = el('div', 'pts-meta');
       meta.append(el('span', '', item.site || ''), el('span', '', fmtSize(item.size_gb)),

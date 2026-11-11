@@ -1,6 +1,6 @@
-import { importShared } from './__federation_fn_import.js?v=1.2.2';
+import { importShared } from './__federation_fn_import.js?v=1.2.3';
 // 带版本号，避免升级后浏览器仍用缓存的旧 ui.js
-import { mountUI } from './ui.js?v=1.2.2';
+import { mountUI } from './ui.js?v=1.2.3';
 
 const Vue = await importShared('vue');
 const { h, ref, onMounted, onBeforeUnmount } = Vue;

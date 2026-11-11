@@ -117,12 +117,40 @@ def resolve(name: str, kind: str = "series", season: int | None = None,
     return meta
 
 
+def _norm_title(text: str) -> str:
+    """去掉空格与常见分隔符，只比「片名骨架」。"""
+    import re
+
+    return re.sub(r"[\s··\-_.()\[\]{}【】（）:：]+", "", str(text or "")).lower()
+
+
+def _match_rank(title: str, query: str) -> int:
+    """候选相对用户输入的相关度：0 完全同名 → 1 前缀 → 2 含同名 → 3 无关。
+
+    《天下第一》这种输入，TMDB 常把「天下第一良配」排在前面，导致默认选中
+    错的作品、再按它去站点搜就串了。按「骨架完全相等优先」重排，让正剧《天下第一》
+    排第一，同名短剧退到后面。
+    """
+    t = _norm_title(title)
+    q = _norm_title(query)
+    if not t or not q:
+        return 3
+    if t == q:
+        return 0
+    if t.startswith(q):
+        return 1
+    if q in t:
+        return 2
+    return 3
+
+
 def search(name: str, kind: str = "series", limit: int = 4) -> list[dict]:
     """按名字列出同名候选（含年份、动画/真人、季数、总集数），给前端点选用。
 
     同名作品很容易认错（《天下第一》既有 2005 剧集也有 2021 电影，
     《凡人修仙传》2020 是动画、2025 是真人剧），所以把候选都摆出来，
-    用户点哪个就用哪个的 TMDB ID。
+    用户点哪个就用哪个的 TMDB ID。候选先按「片名骨架与输入是否完全同名」重排，
+    完全同名（如《天下第一》）排最前，避免默认选中「天下第一良配」这种同名短剧。
     """
     title = str(name or "").strip()
     if len(title) < 1:
@@ -169,6 +197,12 @@ def search(name: str, kind: str = "series", limit: int = 4) -> list[dict]:
                 "genres": detail.get("genres") or [],
                 "is_anim": bool(detail.get("is_anim")),
             })
+    # 完全同名优先；再让类型与当前选择一致（剧集/电影）的靠前；同类里旧作（经典正剧）在前
+    out.sort(key=lambda x: (
+        _match_rank(x["meta_title"], title),
+        0 if (x["kind"] == "series") == (str(kind) == "series") else 1,
+        str(x["year"] or ""),
+    ))
     return out
 
 

@@ -66,8 +66,8 @@ def build_trigger(sub: dict, tz: str):
 
 class PtSubscriber(_PluginBase):
     plugin_name = "定时订阅下载"
-    plugin_desc = "自己选周几几点，到指定站点搜资源并按详细规则下载到指定容器；自动对接 TMDB 显示海报与总集数。"
-    plugin_version = "1.2.2"
+    plugin_desc = "自己选周几几点，到指定站点搜资源并按详细规则下载到指定容器；自动对接 TMDB 显示海报与总集数，同名作品默认选对、搜索结果标注是否对得上认准作品。"
+    plugin_version = "1.2.3"
     plugin_author = "wzy"
     plugin_config_prefix = "ptsubscriber_"
     plugin_order = 90
