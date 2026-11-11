@@ -166,6 +166,19 @@ def search(name: str, kind: str = "series", limit: int = 4) -> list[dict]:
     用户点哪个就用哪个的 TMDB ID。候选先按「片名骨架与输入是否完全同名」重排，
     完全同名（如《天下第一》）排最前，避免默认选中「天下第一良配」这种同名短剧。
     """
+    return _search_rows(name, kind, limit, with_detail=True)
+
+
+def search_fast(name: str, kind: str = "series", limit: int = 5) -> list[dict]:
+    """QQ / 微信这类纯文本渠道用的快查：不查图片、不逐个拉详情。
+
+    只把 TV / Movie 的搜索接口返回的字段（年份、简介）用起来，少 2N 次请求，
+    消息里也不出现图片，回复更快。前端点选候选仍用 search()（要海报和分季）。
+    """
+    return _search_rows(name, kind, limit, with_detail=False)
+
+
+def _search_rows(name: str, kind: str, limit: int, *, with_detail: bool) -> list[dict]:
     title = str(name or "").strip()
     if len(title) < 1:
         return []
@@ -193,23 +206,30 @@ def search(name: str, kind: str = "series", limit: int = 4) -> list[dict]:
             tid = row.get("id")
             if not tid or any(x["tmdb_id"] == int(tid) for x in out):
                 continue
-            try:
-                detail = _tv_details(int(tid), None) if mtype == "tv" else _movie_details(int(tid))
-            except Exception:
-                continue
+            if with_detail:
+                try:
+                    detail = (_tv_details(int(tid), None) if mtype == "tv"
+                              else _movie_details(int(tid)))
+                except Exception:
+                    continue
+            else:
+                # 快查：直接用搜索结果里的名字/年份/简介，一次详情都不拉
+                detail = _brief(row)
             seasons = detail.get("seasons") or []
             out.append({
                 "tmdb_id": int(tid),
                 "kind": "series" if mtype == "tv" else "movie",
                 "meta_title": detail.get("meta_title") or "",
                 "year": detail.get("year") or "",
-                "poster_path": detail.get("poster_path") or "",
-                "poster_url": poster_url(detail.get("poster_path")),
+                # 不查图片：QQ / 微信纯文本渠道用不上海报，省一轮图片地址拼装
+                "poster_path": "",
+                "poster_url": "",
                 "total_eps": int(detail.get("total_eps") or 0),
                 "season_count": len(seasons),
                 "seasons": seasons,
                 "genres": detail.get("genres") or [],
                 "is_anim": bool(detail.get("is_anim")),
+                "overview": str(detail.get("overview") or ""),
             })
     # 完全同名优先；再让类型与当前选择一致（剧集/电影）的靠前；同类里旧作（经典正剧）在前
     out.sort(key=lambda x: (
@@ -218,6 +238,34 @@ def search(name: str, kind: str = "series", limit: int = 4) -> list[dict]:
         str(x["year"] or ""),
     ))
     return out
+
+
+def _brief(row: dict) -> dict:
+    """快查版详情：只用搜索结果自带的字段，一次详情请求都不发。
+
+    搜索接口本身就有 name/title、first_air_date/release_date、overview、genre_ids，
+    对「让用户认出是哪一部」已经够用；集数/分季/海报这些只在点选确认后再补。
+    """
+    raw = row if isinstance(row, dict) else {}
+    title = (raw.get("name") or raw.get("title")
+             or raw.get("original_name") or raw.get("original_title") or "")
+    date = str(raw.get("first_air_date") or raw.get("release_date") or "")
+    ids = raw.get("genre_ids") or []
+    try:
+        anim = 16 in [int(x) for x in ids]
+    except (TypeError, ValueError):
+        anim = False
+    return {
+        "meta_title": title,
+        "year": date[:4],
+        "poster_path": "",
+        "total_eps": 0,
+        "season_eps": 0,
+        "seasons": [],
+        "genres": [],
+        "is_anim": anim,
+        "overview": str(raw.get("overview") or ""),
+    }
 
 
 def _search(title: str, kind: str) -> dict:
@@ -267,6 +315,7 @@ def _movie_details(tmdb_id: int) -> dict:
         "seasons": [],
         "genres": genres,
         "is_anim": anim,
+        "overview": str(data.get("overview") or ""),
     }
 
 
@@ -286,4 +335,5 @@ def _tv_details(tmdb_id: int, season: int | None) -> dict:
         "seasons": seasons,
         "genres": genres,
         "is_anim": anim,
+        "overview": str(data.get("overview") or ""),
     }

@@ -1,11 +1,11 @@
 """智能助手 / QQ 等远程入口：把「订阅天下第一」穿透到插件，不经 MP 自带订阅。
 
-两条链路共用同一套「先列同名候选、再回序号确认」的逻辑，都在插件实例方法
-remote_start / remote_pick 里：
+两条链路共用同一套「先列候选、再回序号确认」的逻辑，都在插件实例方法
+remote_sub / remote_pick / remote_find / remote_dl_pick 里：
 
 - 智能助手：get_agent_tools() 注册 MoviePilotTool，LLM 在自然语言对话里调用。
-- QQ / 远程命令：get_command() 注册 /ptsub，PluginAction 事件把片名放在
-  event_data["arg_str"]。
+- QQ / 远程命令：get_command() 注册 /ptsub、/ptfind、/ptlist，PluginAction 事件
+  把后面的自由文本放进 event_data["arg_str"]。
 
 本模块只放「工具类」和「入参模型」，业务逻辑在 PtSubscriber 上，避免跨文件
 搬 store / bridge / 调度器。
@@ -27,6 +27,7 @@ except Exception:  # pragma: no cover - 取决于宿主版本
     MoviePilotTool = object  # type: ignore
 
 TOOL_NAME = "ptsub_subscribe"
+FIND_TOOL_NAME = "ptsub_find"
 
 PLUGIN_ID = "PtSubscriber"
 
@@ -45,6 +46,56 @@ class PtSubSubscribeInput(BaseModel):
     kind: Optional[str] = Field(
         default=None,
         description="series 表示剧集、movie 表示电影；不传按剧集处理。",
+    )
+    ep_start: Optional[int] = Field(
+        default=None,
+        description="从第几集开始补（用户说「从第5集开始」时传 5）；不传表示从第 1 集起。",
+    )
+    ep_end: Optional[int] = Field(
+        default=None,
+        description="补到第几集（可空）。只在用户明确给了区间时传。",
+    )
+    sites: Optional[str] = Field(
+        default=None,
+        description="限定站点的名字或域名，多个用逗号分隔，如「馒头,岛」；不传用全部可搜索站点。",
+    )
+    time: Optional[str] = Field(
+        default=None,
+        description="每天几点去搜，HH:MM，如 03:00；用户说「每天凌晨3点」就传 03:00。",
+    )
+    interval: Optional[int] = Field(
+        default=None,
+        description="每隔多少分钟搜一次（用户说「每半小时」传 30）；与 time 二选一。",
+    )
+    run_now: Optional[bool] = Field(
+        default=None,
+        description="用户要求「现在就搜/立即下载」时传 true，建完订阅立刻跑一轮。",
+    )
+
+
+class PtSubFindInput(BaseModel):
+    """「不订阅，直接找资源下载」的入参。"""
+
+    name: Optional[str] = Field(
+        default=None,
+        description="要下载的片名，如「天下第一」；首次调用必须提供。",
+    )
+    pick: Optional[int] = Field(
+        default=None,
+        description="资源序号（从 1 开始）。仅在已返回资源列表后回传；"
+                    "多个用逗号，如「1,3」用 pick_range。",
+    )
+    pick_range: Optional[str] = Field(
+        default=None,
+        description="要下载的序号区间，如「1-3」或「1,3」；用户要下多条时传这个。",
+    )
+    episode: Optional[int] = Field(
+        default=None,
+        description="只要某一集时传集数，如 5；不传按全部。",
+    )
+    sites: Optional[str] = Field(
+        default=None,
+        description="限定站点名字或域名，多个用逗号分隔；不传搜全部可搜索站点。",
     )
 
 
@@ -72,6 +123,33 @@ def _find_plugin() -> Any:
     return plugin_ref
 
 
+def _opts(
+    *,
+    ep_start: Optional[int] = None,
+    ep_end: Optional[int] = None,
+    sites: Optional[str] = None,
+    time: Optional[str] = None,
+    interval: Optional[int] = None,
+    run_now: Optional[bool] = None,
+) -> dict:
+    """工具入参 → 插件用的 opts 字典（只放有值的，避免覆盖默认值）。"""
+    site_words = [x.strip() for x in str(sites or "").replace("，", ",").split(",") if x.strip()]
+    opts: dict = {"sites": site_words}
+    if ep_start:
+        opts["ep_start"] = int(ep_start)
+    if ep_end:
+        opts["ep_end"] = int(ep_end)
+    if time:
+        opts["schedule_time"] = str(time).strip()
+        opts["schedule_mode"] = "daily"
+    if interval:
+        opts["schedule_interval"] = int(interval)
+        opts["schedule_mode"] = "interval"
+    if run_now:
+        opts["run_now"] = True
+    return opts
+
+
 class PtSubSubscribeTool(MoviePilotTool):
     """「订阅天下第一」→ 建本插件的定时补搜订阅，不是 MP 自带的订阅。"""
 
@@ -81,6 +159,8 @@ class PtSubSubscribeTool(MoviePilotTool):
         "按已播集数补搜追更），不是 MoviePilot 自带的订阅，不要改用其他订阅工具。"
         "第一次调用只传 name 查询同名作品；若返回候选列表，把列表原样给用户看，"
         "等用户回复序号后再调用本工具并传 pick（如 2）。"
+        "用户提到「从第几集开始」「只搜某几个站」「每天几点」「现在就搜」时，"
+        "分别传 ep_start / sites / time / run_now。"
     )
     args_schema: Type[BaseModel] = PtSubSubscribeInput
 
@@ -97,6 +177,12 @@ class PtSubSubscribeTool(MoviePilotTool):
         name: Optional[str] = None,
         pick: Optional[int] = None,
         kind: Optional[str] = None,
+        ep_start: Optional[int] = None,
+        ep_end: Optional[int] = None,
+        sites: Optional[str] = None,
+        time: Optional[str] = None,
+        interval: Optional[int] = None,
+        run_now: Optional[bool] = None,
         **kwargs: Any,
     ) -> str:
         """查候选 / 按序号确认，最终落到插件自己的订阅表。"""
@@ -105,21 +191,70 @@ class PtSubSubscribeTool(MoviePilotTool):
             return "「定时订阅下载」插件未运行，请先在 MoviePilot 插件页启用它再试。"
 
         key = f"agent|{getattr(self, '_session_id', '') or ''}"
+        opts = _opts(ep_start=ep_start, ep_end=ep_end, sites=sites,
+                     time=time, interval=interval, run_now=run_now)
         if pick is not None:
             try:
                 index = int(pick)
             except (TypeError, ValueError):
                 return "候选序号需要是数字，例如 1、2、3。"
-            return plugin.remote_pick(index, key=key)
+            return plugin.remote_pick(index, key=key, opts=opts)
 
         title = str(name or "").strip()
         if not title:
             return "请告诉我片名，例如「订阅天下第一」；我会先列出同名作品让你选。"
-        return plugin.remote_start(title, kind=kind or "series", key=key)
+        return plugin.remote_start(title, kind=kind or "series", key=key, opts=opts)
+
+
+class PtSubFindTool(MoviePilotTool):
+    """「不订阅，直接帮我找资源下载」→ 搜一轮、列资源、按序号下发下载器。"""
+
+    name: str = FIND_TOOL_NAME
+    description: str = (
+        "只找资源并下载一次，不创建订阅、不追更。用于用户说「不用订阅，直接帮我下载」"
+        "「找一下这部片的资源」。第一次调用传 name 搜索，把返回的资源列表原样给用户看；"
+        "用户回序号后再调用一次，传 pick 或 pick_range（如「1-3」）提交下载。"
+        "如果用户其实想要持续追更，改用 ptsub_subscribe 那个订阅工具。"
+    )
+    args_schema: Type[BaseModel] = PtSubFindInput
+
+    def get_tool_message(self, **kwargs: Any) -> Optional[str]:
+        """生成工具执行期间的提示文案。"""
+        if kwargs.get("pick") or kwargs.get("pick_range"):
+            return "正在把选中的资源提交到下载器…"
+        name = str(kwargs.get("name") or "").strip()
+        return f"正在搜索「{name}」的资源…" if name else "正在搜索资源…"
+
+    async def run(  # type: ignore[override]
+        self,
+        name: Optional[str] = None,
+        pick: Optional[int] = None,
+        pick_range: Optional[str] = None,
+        episode: Optional[int] = None,
+        sites: Optional[str] = None,
+        **kwargs: Any,
+    ) -> str:
+        """搜资源 / 按序号提交下载。"""
+        plugin = _find_plugin()
+        if plugin is None:
+            return "「定时订阅下载」插件未运行，请先在 MoviePilot 插件页启用它再试。"
+
+        key = f"agent|{getattr(self, '_session_id', '') or ''}"
+        addr = str(pick_range or "").strip()
+        if not addr and pick is not None:
+            addr = str(pick).strip()
+        if addr:
+            return plugin.remote_dl_pick(addr, key=key)
+
+        title = str(name or "").strip()
+        if not title:
+            return "请告诉我片名，例如「帮我找一下天下第一的资源」。"
+        intent = _opts(sites=sites, ep_start=episode)
+        return plugin.remote_dl_start(title, intent, key=key)
 
 
 def build_agent_tools() -> List[Any]:
     """给插件的 get_agent_tools() 用；宿主不支持智能体时返回空列表。"""
     if MoviePilotTool is object:
         return []
-    return [PtSubSubscribeTool]
+    return [PtSubSubscribeTool, PtSubFindTool]
