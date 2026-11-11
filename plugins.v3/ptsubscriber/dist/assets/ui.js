@@ -1,5 +1,5 @@
 /* PtSubscriber 插件页面：原生 DOM，无构建工具，宿主注入的 api 负责鉴权。 */
-const UI_VERSION = '1.2.3';
+const UI_VERSION = '1.2.4';
 const CSS = `
 .pts-root,.pts-ov{--acc:#8b5cf6;--acc2:#a78bfa;--sur:#ffffff;--sur2:#f7f7fb;--sur3:#eeeef6;--on:#1f2230;--muted:rgba(31,34,48,.58);--line:rgba(17,24,39,.1);--soft:rgba(139,92,246,.12);--danger:#dc2626;--ok:#16a34a;--warn:#b45309}
 .pts-dark{--sur:#1b1e26;--sur2:#232733;--sur3:#2b3040;--on:#e9ebf2;--muted:rgba(233,235,242,.6);--line:rgba(255,255,255,.12);--soft:rgba(139,92,246,.22);--danger:#f87171;--ok:#4ade80;--warn:#fbbf24}
@@ -173,6 +173,10 @@ const CSS = `
 .pts-tablewrap{border:1px solid var(--line);border-radius:14px;overflow-x:auto;overflow-y:hidden;background:var(--sur);margin-bottom:18px}
 .pts-tablewrap .pts-table{min-width:100%}
 .pts-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(348px,1fr));gap:12px}
+.pts-group{grid-column:1/-1;display:flex;align-items:center;gap:9px;margin:6px 0 -4px;font-size:12px;font-weight:600;color:var(--muted);letter-spacing:.2px}
+.pts-group::after{content:'';flex:1;height:1px;background:var(--line)}
+.pts-group.ok{color:var(--ok)}
+.pts-group.dim{opacity:.75}
 .pts-card{border:1px solid var(--line);border-radius:14px;background:var(--sur);padding:13px 14px;transition:.15s}
 .pts-card:hover{border-color:rgba(139,92,246,.4)}
 .pts-card.main{display:flex;gap:10px;align-items:flex-start}
@@ -1587,7 +1591,7 @@ export function mountUI(root, api) {
         const head = el('b', '', `按 TMDB 认准的《${meta.title}》${meta.year ? '（' + meta.year + '）' : ''} 搜索`);
         head.style.display = 'block';
         const body = el('span', '', okCount > 0
-          ? `这 ${state.result.items.length} 条里，有 ${okCount} 条对得上这部；同名其它剧已标「同名其它」，别下错。`
+          ? `这 ${state.result.items.length} 条里有 ${okCount} 条对得上这部，已排在最前；其余同名其它剧排在后面并标「同名其它」，别下错。`
           : `这 ${state.result.items.length} 条里没有一部对得上这部——下面多半是同名其它剧，先核对再勾选。`);
         body.style.fontSize = '12px';
         body.style.opacity = '.85';
@@ -1595,8 +1599,32 @@ export function mountUI(root, api) {
         line.append(txt);
         resultBox.append(line);
       }
+      // 认准作品排前面：0「✓ 匹配认准作品」→ 1 其它 → 2「同名其它」
+      // 同组内先列符合规则的，再保持站点原始顺序
+      const rankOf = (it) => {
+        const m = metaMatchState(it);
+        return m === 'ok' ? 0 : (m === 'other' ? 2 : 1);
+      };
+      const items = state.result.items
+        .map((it, idx) => ({ it, idx }))
+        .sort((a, b) => (rankOf(a.it) - rankOf(b.it))
+          || ((a.it.reason ? 1 : 0) - (b.it.reason ? 1 : 0))
+          || (a.idx - b.idx))
+        .map((x) => x.it);
       const grid = el('div', 'pts-grid');
-      for (const item of state.result.items) grid.append(resultCard(item));
+      const buckets = [[], [], []];
+      for (const it of items) buckets[rankOf(it)].push(it);
+      const titles = ['✓ 匹配认准作品', '其它结果', '同名其它（多半不是这部，别下错）'];
+      // 只有带上认准作品、且确实分了组时，才插分组标题
+      const showHeads = !!(meta && meta.title) && buckets.filter((b) => b.length).length > 1;
+      buckets.forEach((bucket, idx) => {
+        if (!bucket.length) return;
+        if (showHeads) {
+          grid.append(el('div', 'pts-group' + (idx === 0 ? ' ok' : ' dim'),
+            `${titles[idx]} · ${bucket.length} 条`));
+        }
+        for (const item of bucket) grid.append(resultCard(item));
+      });
       resultBox.append(grid);
     }
 
