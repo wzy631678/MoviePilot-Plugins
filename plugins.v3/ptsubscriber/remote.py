@@ -23,13 +23,28 @@ from pydantic import BaseModel, Field
 
 try:  # 宿主没装智能体（旧版本）时降级为普通类，get_agent_tools 返回空即可
     from app.agent.tools.base import MoviePilotTool
+    from app.agent.tools.tags import ToolTag
 except Exception:  # pragma: no cover - 取决于宿主版本
     MoviePilotTool = object  # type: ignore
+    ToolTag = None  # type: ignore
 
 TOOL_NAME = "ptsub_subscribe"
 FIND_TOOL_NAME = "ptsub_find"
 
 PLUGIN_ID = "PtSubscriber"
+
+
+def _tool_tags(*names: str) -> list[str]:
+    """把 ToolTag 成员名转成标签值；宿主无智能体标签时返回空列表。
+
+    智能助手的工具选择器按能力标签（ToolTag）分组：用户说「订阅/追剧」会选
+    Subscription 组、说「资源/种子」会选 Resource 组。插件工具必须声明这些
+    标签，否则会被选择器过滤掉，用户的「订阅 X」「找资源 X」就会落到 MP 原生
+    订阅工具上（这也是订阅跑进 MP 订阅页、回复带海报图的原因）。
+    """
+    if ToolTag is None:
+        return []
+    return [getattr(ToolTag, n).value for n in names if hasattr(ToolTag, n)]
 
 
 class PtSubSubscribeInput(BaseModel):
@@ -155,12 +170,18 @@ class PtSubSubscribeTool(MoviePilotTool):
 
     name: str = TOOL_NAME
     description: str = (
-        "订阅某部剧或电影，走「定时订阅下载」插件的规则（TMDB 认准作品 + 按站点规则下载、"
-        "按已播集数补搜追更），不是 MoviePilot 自带的订阅，不要改用其他订阅工具。"
+        "【插件专用】这是处理「订阅某部剧/电影」的唯一入口：用户说「订阅X」「追X」"
+        "「订一下X」「X更新了帮我订」时，必须用本工具，不要改用 MoviePilot 通用订阅工具"
+        "或其它订阅插件。走「定时订阅下载」插件的规则（TMDB 认准作品 + 按站点规则下载、"
+        "按已播集数补搜追更），与 MoviePilot 自带订阅完全无关。"
         "第一次调用只传 name 查询同名作品；若返回候选列表，把列表原样给用户看，"
         "等用户回复序号后再调用本工具并传 pick（如 2）。"
         "用户提到「从第几集开始」「只搜某几个站」「每天几点」「现在就搜」时，"
         "分别传 ep_start / sites / time / run_now。"
+    )
+    tags: list[str] = Field(
+        default_factory=lambda: _tool_tags(
+            "Subscription", "Media", "Download", "Site", "Scheduler", "Plugin")
     )
     args_schema: Type[BaseModel] = PtSubSubscribeInput
 
@@ -211,10 +232,16 @@ class PtSubFindTool(MoviePilotTool):
 
     name: str = FIND_TOOL_NAME
     description: str = (
-        "只找资源并下载一次，不创建订阅、不追更。用于用户说「不用订阅，直接帮我下载」"
-        "「找一下这部片的资源」。第一次调用传 name 搜索，把返回的资源列表原样给用户看；"
+        "【插件专用】这是处理「不订阅、直接找资源下载」的唯一入口：用户说「帮我找X的资源」"
+        "「找一下X」「不用订阅直接下X」「搜X的种子」时，必须用本工具，不要用 MoviePilot "
+        "通用搜索/下载工具。只找资源并下载一次，不创建订阅、不追更。"
+        "第一次调用传 name 搜索，把返回的资源列表原样给用户看；"
         "用户回序号后再调用一次，传 pick 或 pick_range（如「1-3」）提交下载。"
         "如果用户其实想要持续追更，改用 ptsub_subscribe 那个订阅工具。"
+    )
+    tags: list[str] = Field(
+        default_factory=lambda: _tool_tags(
+            "Resource", "Download", "Site", "Media", "Plugin")
     )
     args_schema: Type[BaseModel] = PtSubFindInput
 
