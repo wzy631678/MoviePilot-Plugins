@@ -603,11 +603,38 @@ def render_candidates(
     return "\n".join(lines)
 
 
+_UI_RES = {"4k": "4K", "1080p": "1080p", "720p": "720p", "480p": "480p"}
+_UI_CODEC = {"h264": "x264", "h265": "x265", "av1": "AV1", "vc1": "VC-1", "xvid": "XviD"}
+_UI_SOURCE = {"webdl": "WEB-DL", "bluray": "BluRay", "remux": "REMUX",
+              "hdtv": "HDTV", "dvd": "DVD", "tc": "枪版"}
+
+
+def _attrs_spec(r: dict) -> str:
+    """资源行的清晰度/编码/来源：从 attrs 读，如「1080p·x265·WEB-DL」。
+
+    资源行没有顶层 resolution 字段，真正的规格都在 `attrs`（resolutions /
+    codecs / sources / hdr）里，之前没读所以一直不显示。用「·」紧凑连接，
+    三个都齐时也只占十几个字宽。
+    """
+    attrs = r.get("attrs") or {}
+    parts: list[str] = []
+    for res in attrs.get("resolutions") or []:
+        parts.append(_UI_RES.get(str(res).lower(), str(res)))
+    for codec in attrs.get("codecs") or []:
+        parts.append(_UI_CODEC.get(str(codec).lower(), str(codec)))
+    for src in attrs.get("sources") or []:
+        parts.append(_UI_SOURCE.get(str(src).lower(), str(src)))
+    if attrs.get("hdr"):
+        parts.append("HDR")
+    return "·".join(parts)
+
+
 def _res_meta(r: dict, show_site: bool = True) -> str:
-    """一行的副信息：站点 · 做种 · 下载 · 清晰度 · 体积 · 标记。
+    """一行的副信息：站点 · 做种 · 下载 · 清晰度/编码 · 体积 · 标记。
 
     用户最关心的三个数（站点、做种、下载人数）放在最前面，扫一眼就能判断
-    「这条快不快、要不要下」；清晰度/体积/免费标记跟在后面，不抢眼。
+    「这条快不快、要不要下」；清晰度/编码（x264/x265/WEB-DL）、体积、免费
+    标记跟在后面，不抢眼。
     """
     bits: list[str] = []
     if show_site and (r.get("site") or r.get("domain")):
@@ -620,9 +647,14 @@ def _res_meta(r: dict, show_site: bool = True) -> str:
         bits.append(f"下载 {peers}")
     # 「完成 xxx」不再显示：它对「下不下得动」没有参考价值，却要占十来个字，
     # 留着会把参数行挤成两行。做种/下载两个数已经够判断资源热不热。
-    res = str(r.get("resolution") or "")
-    if res:
-        bits.append(res.upper() if res.lower() in ("4k", "1080p", "720p", "480p") else res)
+    spec = _attrs_spec(r)
+    if not spec:
+        # 老数据没有 attrs 时退回顶层 resolution 兜底
+        res = str(r.get("resolution") or "")
+        if res:
+            spec = (res.upper() if res.lower() in ("4k", "1080p", "720p", "480p") else res)
+    if spec:
+        bits.append(spec)
     size = r.get("size_gb")
     if size:
         try:
