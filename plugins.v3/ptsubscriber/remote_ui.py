@@ -582,47 +582,94 @@ def render_candidates(
     return "\n".join(lines)
 
 
+def _res_meta(r: dict, show_site: bool = True) -> str:
+    """一行的副信息：站点 · 清晰度 · 集数 · 体积 · 做种 · 下载 · 免费。
+
+    顺序对齐 MP 自己的搜索结果（站点在最前、种子数据居中、标记在后），
+    这样在聊天里扫一眼就能判断「快不快、要不要下」。
+    """
+    bits: list[str] = []
+    if show_site and (r.get("site") or r.get("domain")):
+        bits.append(str(r.get("site") or r.get("domain")))
+    res = str(r.get("resolution") or "")
+    if res:
+        bits.append(res.upper() if res.lower() in ("4k", "1080p", "720p", "480p") else res)
+    ep = r.get("episode")
+    if ep:
+        bits.append(f"第{ep}集")
+    size = r.get("size_gb")
+    if size:
+        try:
+            v = float(size)
+            bits.append(f"{v / 1024:.1f}T" if v >= 1024 else f"{v:.1f}G")
+        except (TypeError, ValueError):
+            pass
+    seed = r.get("seeders")
+    if seed is not None:
+        bits.append(f"做种 {seed}")
+    peers = r.get("peers")
+    if peers is not None:
+        bits.append(f"下载 {peers}")
+    grabs = r.get("grabs")
+    if grabs:
+        bits.append(f"完成 {grabs}")
+    if r.get("free") or "FREE" in (r.get("badges") or []):
+        bits.append("免费")
+    else:
+        for badge in (r.get("badges") or []):
+            b = str(badge)
+            if b in ("FREE", "2X", "2XFREE", "50%", "30%"):
+                bits.append(b)
+                break
+    if r.get("hr") or "H&R" in (r.get("badges") or []):
+        bits.append("H&R")
+    return " · ".join(bits)
+
+
 def render_resources(
     query: str,
     rows: Iterable[dict],
     *,
-    limit: int = MAX_RESOURCES,
+    offset: int = 0,
+    page_size: int = MAX_RESOURCES,
+    total: int | None = None,
+    limit: int | None = None,
     show_site: bool = True,
 ) -> str:
-    """列资源：序号 + 站点/清晰度/集数/体积/做种，一行一条，方便回「1-3」直接下。"""
+    """列资源：每条两行（资源名 / 站点·清晰度·体积·做种·下载），分页展示。
+
+    行数上限只是「一屏显示多少条」，不是搜到多少条；超出部分用「下一页」翻。
+    """
     all_rows = list(rows)
-    items = all_rows[:limit]
+    total = len(all_rows) if total is None else int(total)
+    size = int(limit or page_size or MAX_RESOURCES)
+    offset = max(0, int(offset))
+    if offset >= total and total:
+        offset = max(0, (total - 1) // size * size)
+    items = all_rows[offset:offset + size]
     if not items:
         return (f"「{query}」没搜到符合条件的资源。\n"
                 "换个片名重试，或去插件页把规则放宽（清晰度/体积/做种）。")
-    lines = [f"「{query}」找到 {len(items)} 条资源，回序号直接下："]
-    for i, r in enumerate(items, 1):
-        bits: list[str] = []
-        if show_site and (r.get("site") or r.get("domain")):
-            bits.append(str(r.get("site") or r.get("domain")))
-        res = r.get("resolution") or ""
-        if res:
-            bits.append(str(res))
-        ep = r.get("episode")
-        if ep:
-            bits.append(f"第{ep}集")
-        size = r.get("size_gb")
-        if size:
-            try:
-                bits.append(f"{float(size):.1f}G")
-            except (TypeError, ValueError):
-                pass
-        seed = r.get("seeders")
-        if seed is not None:
-            bits.append(f"{seed}种")
-        if r.get("free") or "FREE" in (r.get("badges") or []):
-            bits.append("免费")
-        title = str(r.get("display_title") or r.get("title") or "")
-        head = f"{i}. [{' · '.join(bits)}] " if bits else f"{i}. "
-        lines.append(head + _short(title, 58))
-    if len(all_rows) > len(items):
-        lines.append(f"（只列前 {len(items)} 条，共 {len(all_rows)} 条）")
-    lines.append("回「1」下第 1 条；多条回「1-3」或「1,3」；回「订阅」改成定时追更。")
+    first = offset + 1
+    last = offset + len(items)
+    if total > size:
+        head = (f"「{query}」共 {total} 条资源，按做种从多到少"
+                f"（第 {first}-{last} 条）：")
+    else:
+        head = f"「{query}」找到 {total} 条资源，按做种从多到少："
+    lines = [head]
+    for idx in range(first, last + 1):
+        r = all_rows[idx - 1]
+        title = str(r.get("display_title") or r.get("title") or "").strip()
+        lines.append(f"{idx}. {_short(title, 70)}")
+        meta = _res_meta(r, show_site=show_site)
+        if meta:
+            lines.append(f"    {meta}")
+    if total > size:
+        if last < total:
+            lines.append(f"（共 {total} 条，还有 {total - last} 条 · 回「下一页」看第 {last + 1}-{min(total, last + size)} 条）")
+        else:
+            lines.append(f"（共 {total} 条 · 已是最后一页，回「上一页」往回翻）")
     return "\n".join(lines)
 
 
@@ -667,6 +714,7 @@ def render_help() -> str:
         "建好订阅会先搜一轮，把能下的资源列出来：回 [1] 就下这条，回「不用」只挂着订阅",
         "列完候选回 [1] [从5集] [站点馒头] [每天3:00] —— 方括号可有可无",
         "查资源 片名 站点 清晰度 —— 只列资源不下订阅，回 [1] 或 [1-3] 直接下",
+        "一屏 8 条，按做种从多到少；看后面的发「下一页」，往回发「上一页」",
         "/ptlist 看订阅进度；/ptsub help 看这条",
     ])
 

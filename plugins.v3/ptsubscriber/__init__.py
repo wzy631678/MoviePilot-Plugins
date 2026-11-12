@@ -96,7 +96,7 @@ def build_trigger(sub: dict, tz: str):
 class PtSubscriber(_PluginBase):
     plugin_name = "定时订阅下载"
     plugin_desc = "自己选周几几点，到指定站点搜资源并按详细规则下载到指定容器；自动对接 TMDB，按片名、年份、剧集/电影、集数逐项比对，只把真正这部排在最前。聊天入口不用打斜杠，一条说全最省事：「订阅 天下第一 观众 1080P 周一5:30」（片名/站点/清晰度/周期顺序随意）；也可以只发「订阅 天才女友」先列同名作品，回序号后再选「从第几集 / 哪些站 / 多久刷一次」，回「确定」立刻补搜并把能下的资源列出来让你挑；「查资源 仙逆 馒头 1080P」只搜一轮直接下，不建订阅。斜杠命令 /ptsub、/ptfind、/ptlist 一样可用；回复全是纯文本不带图。"
-    plugin_version = "1.8.0"
+    plugin_version = "1.9.0"
     plugin_author = "wzy"
     plugin_config_prefix = "ptsubscriber_"
     plugin_order = 90
@@ -999,7 +999,16 @@ class PtSubscriber(_PluginBase):
             return "已取消这次下载选择。要重搜就发「找资源 片名」。"
         if raw in ("订阅", "订阅它", "订阅这个", "追更", "改订阅"):
             return self.remote_dl_subscribe(key=key)
-        rows = pending.get("rows") or []
+        # 翻页：一屏放不下时看后面的，序号全表连续，翻到哪页都能直接回数字
+        if raw in ("下一页", "下页", "下一批", "更多", "再列", "继续", "后面的",
+                   "后面", "往下翻", "下一条"):
+            return self.remote_dl_page(key=key, delta=1)
+        if raw in ("上一页", "上页", "上批", "往前翻", "前面"):
+            return self.remote_dl_page(key=key, delta=-1)
+        m = re.fullmatch(r"第?\s*([2-9]\d?)\s*[页屏]", raw)
+        if m:
+            return self.remote_dl_page(key=key, page=int(m.group(1)))
+        rows = self._dl_rows(pending)
         if remote_ui.pick_rows(raw, len(rows), multi=True):
             return self.remote_dl_pick(raw, key=key)
         return None
@@ -1298,20 +1307,78 @@ class PtSubscriber(_PluginBase):
                           if intent.get("resolution") else {})
         passed, _ = filter_candidates(pseudo, result.get("items") or [], set(),
                                       rules_override=rules_override)
-        passed.sort(key=lambda x: (-(x.get("seeders") or 0), x.get("size_gb") or 0))
+        passed = self._rank_rows(name, passed)
         if not passed:
             return (f"「{name}」没搜到可用资源。\n"
                     "换个片名写法，或去掉集数限制，或去插件页确认站点可搜索。"
                     f"{self._search_fail_reason(result)}")
 
-        rows = passed[: remote_ui.MAX_RESOURCES]
+        rows = passed
         self._pending_dl[key] = {"name": name, "token": result.get("token") or "",
-                                 "rows": rows, "ep_start": intent.get("ep_start"),
+                                 "rows": rows, "all_rows": rows, "offset": 0,
+                                 "ep_start": intent.get("ep_start"),
+                                 "errors": len(result.get("errors") or []),
                                  "at": self._now_ts()}
-        text = remote_ui.render_resources(name, rows)
-        if result.get("errors"):
-            text += f"\n（{len(result['errors'])} 个站点报错，已跳过）"
+        return self._dl_text(self._pending_dl[key], key)
+
+    @staticmethod
+    def _rank_rows(name: str, rows: list) -> list:
+        """片名对得上的排前面，再按做种从多到少——做种多的先下，速度更快。
+
+        PT 站的关键词搜索会给一堆同名前缀的作品（搜「天下第一」会混进
+        《天下第一剑》《天下第一楼》），先把标题里带本名的提上来，翻第一页
+        就能看到真能下的那几条。
+        """
+        core = str(search_keyword({"name": name}) or "").replace(" ", "")
+        def _key(r: dict):
+            title = str(r.get("display_title") or r.get("title") or "").replace(" ", "")
+            hit = 0 if (len(core) >= 2 and core in title) else 1
+            return (hit, -(r.get("seeders") or 0), r.get("size_gb") or 0)
+        return sorted(rows, key=_key)
+
+    def _dl_rows(self, pending: Dict[str, Any]) -> list:
+        """待选资源的完整清单（分页只是显示层，序号始终对应这份全表）。"""
+        return list(pending.get("all_rows") or pending.get("rows") or [])
+
+    def _dl_text(self, pending: Dict[str, Any], key: str = "") -> str:
+        """按当前页渲染资源清单，并接上这个场景该给的下一步指令。"""
+        rows = self._dl_rows(pending)
+        offset = int(pending.get("offset") or 0)
+        name = str(pending.get("name") or "")
+        text = remote_ui.render_resources(name, rows, offset=offset, total=len(rows))
+        if pending.get("mode") == "preview":
+            text += ("\n回序号就下这条（可回 1-3 多条）；回「不用」就只挂着订阅，"
+                     "等计划时间自动搜。")
+        else:
+            text += "\n回「1」下第 1 条；多条回「1-3」或「1,3」；回「订阅」改成定时追更。"
+        if pending.get("errors"):
+            text += f"\n（{pending['errors']} 个站点报错，已跳过）"
         return text
+
+    def remote_dl_page(self, key: str = "", delta: int = 1,
+                       page: Optional[int] = None) -> str:
+        """翻页看后面的资源；序号保持全表连续，翻到哪页都能直接回数字。"""
+        self._pending_prune()
+        pending = self._pending_dl.get(key)
+        if not pending:
+            return ("没有待选资源了。先发「找资源 片名」重新搜一次。")
+        rows = self._dl_rows(pending)
+        total = len(rows)
+        size = max(1, int(remote_ui.MAX_RESOURCES))
+        if total <= size:
+            return self._dl_text(pending, key) + "\n（就这些了，没有下一页）"
+        offset = int(pending.get("offset") or 0)
+        if page is not None:
+            new_off = max(0, (int(page) - 1) * size)
+        else:
+            new_off = offset + int(delta) * size
+        if new_off < 0:
+            return "已经在第一页了。"
+        if new_off >= total:
+            return (f"没有更多了，一共 {total} 条，已经在最后一页。\n"
+                    "回「上一页」往回翻，或直接回序号下。")
+        pending["offset"] = new_off
+        return self._dl_text(pending, key)
 
     def remote_dl_pick(self, addr: str, key: str = "") -> str:
         """用户回了序号：把对应资源提交到 MP 默认下载器。"""
@@ -1319,7 +1386,7 @@ class PtSubscriber(_PluginBase):
         pending = self._pending_dl.get(key)
         if not pending:
             return "没有待选资源。先发 /ptfind 片名 搜一下。"
-        rows = pending.get("rows") or []
+        rows = self._dl_rows(pending)
         picks = remote_ui.pick_rows(addr, len(rows), multi=True)
         if not picks:
             return f"序号无效（1 ~ {len(rows)}）。可以回「1」或「1-3」。"
@@ -1475,20 +1542,19 @@ class PtSubscriber(_PluginBase):
                           if rules.get("resolutions") else {})
         passed, _ = filter_candidates(pseudo, result.get("items") or [], set(),
                                       rules_override=rules_override)
-        passed.sort(key=lambda x: (-(x.get("seeders") or 0), x.get("size_gb") or 0))
+        passed = self._rank_rows(name, passed)
         if not passed:
             tail = self._search_fail_reason(result)
             return ("顺手先搜了一轮：现在还没搜到能下的资源，到计划时间会自动再搜。" + tail,
                     False)
-        rows = passed[: remote_ui.MAX_RESOURCES]
+        rows = passed
         self._pending_dl[key] = {
             "name": name, "token": result.get("token") or "", "rows": rows,
+            "all_rows": rows, "offset": 0,
             "sub_id": str(sub.get("id") or ""), "ep_start": sub.get("ep_start"),
             "mode": "preview", "at": self._now_ts(),
         }
-        text = remote_ui.render_resources(name, rows)
-        text += "\n回序号就下这条（可回 1-3 多条）；回「不用」就只挂着订阅，等计划时间自动搜。"
-        return text, True
+        return self._dl_text(self._pending_dl[key], key), True
 
     def _run_sub_bg(self, sid: str) -> str:
         """立即执行放后台，先回执再搜，QQ 里不用干等一两分钟。"""
