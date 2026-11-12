@@ -23,7 +23,11 @@ MAX_CANDIDATES = 5
 MAX_RESOURCES = 8
 
 _RANGE_RE = re.compile(r"^\s*(\d{1,3})\s*(?:[-~—到]\s*(\d{1,3}))?\s*$")
-_FW = str.maketrans({"：": ":", "＝": "=", "，": ",", "（": "(", "）": ")", "　": " "})
+# 全角 → 半角；各种中文括号统一成 []，方便「[1] [从5集]」这种写法
+_FW = str.maketrans({
+    "：": ":", "＝": "=", "，": ",", "（": "(", "）": ")", "　": " ",
+    "［": "[", "］": "]", "【": "[", "】": "]", "〔": "[", "〕": "]",
+})
 
 # 参数别名：中文口语优先，英文缩写兜底
 _ALIAS = {
@@ -37,10 +41,80 @@ _ALIAS = {
 }
 
 _NOW_WORDS = ("立即", "马上", "现在", "立刻", "现在就", "直接下")
+_YES_WORDS = ("确定", "确认", "就这个", "就这样", "默认", "都行", "可以", "ok")
+
+# 分辨率口语 → 规则里的规范值（4k / 1080p / 720p / 480p）
+_RES_MAP = {
+    "4k": "4k", "2160p": "4k", "u4k": "4k", "蓝光4k": "4k", "hdr": "1080p",
+    "1080p": "1080p", "1080": "1080p", "蓝光": "1080p", "bluray": "1080p",
+    "remux": "1080p", "bd": "1080p", "高清": "1080p",
+    "720p": "720p", "720": "720p", "标清": "480p", "480p": "480p", "sd": "480p",
+}
+_RES_RE = re.compile(r"^(4k|2160p|1080p?|720p?|480p?|蓝光|remux|bluray|bd|hdr|标清|高清|sd)$",
+                     re.I)
+
+
+def _resolution_value(token: str) -> str | None:
+    """「1080P」「4K」「蓝光」→ 规范值；不是分辨率返回 None。"""
+    t = str(token or "").strip().lower()
+    if not t:
+        return None
+    if not _RES_RE.match(t):
+        return None
+    return _RES_MAP.get(t, t)
+
+
+def _looks_like_option(token: str) -> bool:
+    """判断一段文字像不像「参数」（而不是片名）。
+
+    只给方括号解包用：`[1]`、`[从5集]`、`[站点馒头]`、`[每天3:00]` 这类才拆，
+    `[简繁]`、`[1080p]` 这种片名里的方括号原样保留。
+    """
+    t = str(token or "").strip()
+    if not t:
+        return False
+    if re.fullmatch(r"\d{1,3}", t):
+        return True
+    if re.fullmatch(r"\d{1,3}\s*[-~—到]\s*\d{1,3}\s*[集话話]?", t):
+        return True
+    if re.match(r"^(?:从|第)\s*第?\s*\d{1,3}", t):
+        return True
+    if re.match(r"^(?:站点|站|用|在)\s*[:：]?", t):
+        return True
+    if re.match(r"^每", t):
+        return True
+    if re.fullmatch(r"(?:每)?(?:周|星期)[一二三四五六日天1-7]", t):
+        return True
+    if re.fullmatch(r"\d{1,2}\s*:\s*\d{1,2}", t):
+        return True
+    if re.fullmatch(r"(?:电影|movie|影|剧集|剧|series|tv)", t, re.I):
+        return True
+    if re.fullmatch(r"季\s*\d{1,2}", t):
+        return True
+    if _resolution_value(t):
+        return True
+    if t in _NOW_WORDS or t.lower() in _YES_WORDS:
+        return True
+    if "=" in t:
+        key = t.partition("=")[0].strip().lower()
+        return bool(_ALIAS.get(key))
+    return False
+
+
+def _unwrap_brackets(s: str) -> str:
+    """把 `[1] [从5集]` 拆成空格分隔；认不出的方括号保持原样（当片名一部分）。"""
+    def _sub(m: "re.Match[str]") -> str:
+        inner = m.group(1).strip()
+        if inner and all(_looks_like_option(p) for p in inner.split()):
+            return f" {inner} "
+        return m.group(0)
+
+    return re.sub(r"\[([^\[\]]*)\]", _sub, s)
 
 
 def _clean(text: str) -> str:
     s = str(text or "").translate(_FW)
+    s = _unwrap_brackets(s)
     return re.sub(r"\s+", " ", s).strip()
 
 
@@ -60,14 +134,19 @@ def _num(text: str) -> int | None:
         return None
 
 
-def parse_intent(text: str) -> dict[str, Any]:
+def parse_intent(text: str, site_names: Iterable[str] | None = None) -> dict[str, Any]:
     """把一条远程指令拆成结构化意图（顺序随意、中英文混写都行）。
 
         /ptsub 天下第一 从3集 站点馒头 立即
         /ptsub 天下第一 从5 每天3:00
         /ptsub 天下第一 每周三21:30 站点馒头,岛
+        [1] [从5集] [站点馒头] [每天3:00]   ← 方括号写法，最好打
+        天下第一 观众 1080P 周一5:30          ← 站名/分辨率/周几都能裸写
         /ptfind 天下第一 5-8集
         2 / 1-3
+
+    `site_names`：站点口语名/域名清单；给了之后「观众」「馒头」这类裸词会被
+    认成站点而不是片名的一部分（仅在句子里还有别的片名词时生效）。
     """
     raw = _clean(text)
     # 去掉 /ptsub、/ptfind 这类命令前缀，命令本身由调用方决定
@@ -76,7 +155,7 @@ def parse_intent(text: str) -> dict[str, Any]:
         "name": "", "pick": None, "pick_end": None, "ep_start": None, "ep_end": None,
         "sites": [], "run_now": False, "schedule_mode": None, "schedule_time": None,
         "schedule_interval": None, "schedule_weekday": None, "season": None,
-        "kind": None, "list_sites": False, "extra": raw,
+        "kind": None, "resolution": None, "list_sites": False, "extra": raw,
     }
     if not raw:
         return out
@@ -101,14 +180,19 @@ def parse_intent(text: str) -> dict[str, Any]:
             skip_next = True
         else:
             merged.append(tok)
+    # 「周一 5:30」这种周几 + 时间拆成两个词的合并成「周一5:30」
+    merged = _merge_weekday_time(merged)
 
+    site_norm = {_norm(s) for s in (site_names or []) if _norm(s)}
+    maybe_sites: list[str] = []
     name_parts: list[str] = []
     for tok in merged:
         tok = tok.strip(" ,、")
         if not tok:
             continue
         # 动词不是片名的一部分
-        if tok in ("订阅", "下载", "搜索", "找", "找一下", "帮我", "添加", "来", "开始"):
+        if tok in ("订阅", "下载", "搜索", "找", "找一下", "帮我", "添加", "来", "开始",
+                   "查资源", "查片", "搜一下", "找资源"):
             continue
 
         # key=value 写法也认，方便老用户照抄
@@ -134,6 +218,12 @@ def parse_intent(text: str) -> dict[str, Any]:
             out["run_now"] = True
             continue
 
+        # 分辨率：1080P / 4K / 蓝光 / 720P
+        res = _resolution_value(tok)
+        if res:
+            out["resolution"] = res
+            continue
+
         # 每隔 N 分钟 / 每小时
         m = re.fullmatch(r"每\s*(\d{1,4})\s*(分钟|分|min|m|小时|h)", tok, re.I)
         if m:
@@ -142,8 +232,8 @@ def parse_intent(text: str) -> dict[str, Any]:
             out["schedule_mode"] = "interval"
             continue
 
-        # 每周三 21:30 / 每周三21:30 / 每周三晚9点
-        m = re.fullmatch(r"每(?:周|星期)([一二三四五六日天])\s*(?:晚|早上|上午|下午)?\s*"
+        # 每周三 21:30 / 每周三21:30 / 每周三晚9点 / 周一5:30 / 周一 5:30 / 周三 21:30
+        m = re.fullmatch(r"每?(?:周|星期)([一二三四五六日天1-7])\s*(?:晚|早上|上午|下午)?\s*"
                          r"(\d{1,2})(?::(\d{1,2}))?(?:点|时)?", tok)
         if m:
             out["schedule_mode"] = "weekly"
@@ -203,10 +293,52 @@ def parse_intent(text: str) -> dict[str, Any]:
                 out["pick"] = int(tok)
                 out["pick_end"] = int(tok)
             continue
+        # 裸站名：「观众」「馒头」「馒头,岛」这些和站点清单对得上、又不是片名时当站点
+        if site_norm and name_parts:
+            parts = [p for p in re.split(r"[,、/+和]", tok) if p]
+            if parts and all(_norm(p) in site_norm for p in parts):
+                maybe_sites.extend(parts)
+                continue
         name_parts.append(tok)
+
+    # 句子里至少有一个片名词时，裸站名才算站点；只打了「观众」一个词就当片名
+    if name_parts and maybe_sites:
+        out["sites"].extend(_norm(x) for x in maybe_sites)
+    elif maybe_sites and not name_parts:
+        name_parts = maybe_sites
 
     out["name"] = _clean(" ".join(name_parts))
     return out
+
+
+def _merge_weekday_time(tokens: list[str]) -> list[str]:
+    """把「周一 5:30」合并成「周一5:30」，好让 weekly 解析一次吃下。"""
+    out: list[str] = []
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        nxt = tokens[i + 1] if i + 1 < len(tokens) else ""
+        if (re.fullmatch(r"(?:每)?(?:周|星期)[一二三四五六日天1-7]", t)
+                and re.fullmatch(r"\d{1,2}[:：]\d{1,2}", nxt)):
+            out.append(t + nxt)
+            i += 2
+            continue
+        out.append(t)
+        i += 1
+    return out
+
+
+def split_pick(text: str) -> tuple[int | None, str]:
+    """「1 从5集 站点馒头」/「[1] [从5集]」→ (1, "从5集 站点馒头")。
+
+    只认「开头是纯序号、后面跟空格分隔的参数」；「1-3」这种区间不当序号，
+    留给 pick_rows 处理。
+    """
+    s = _clean(text)
+    m = re.match(r"^(\d{1,3})(?:\s+|$)(.*)$", s)
+    if not m:
+        return None, s
+    return int(m.group(1)), m.group(2).strip()
 
 
 def parse_episodes(addr: str) -> tuple[int | None, int | None]:
@@ -307,6 +439,8 @@ def opts_summary(
         bits.append(f"全部 {site_total} 个可搜站")
     else:
         bits.append("全部可搜站")
+    if opts.get("resolution"):
+        bits.append(f"只要{str(opts['resolution']).upper()}")
     plan = schedule_text(opts) or plan_text
     if plan:
         bits.append(plan)
@@ -334,18 +468,22 @@ def render_pick_menu(
     site_total: int = 0,
     plan_text: str = "",
 ) -> str:
-    """选完候选后的第二屏：让用户定集数 / 站点 / 刷新时间。"""
+    """选完候选后的第二屏：让用户定集数 / 站点 / 刷新时间。
+
+    排版刻意短小分层（QQ 单条消息内多空行反而显得挤）：
+    已选 → 当前设置 → 怎么改（三行）→ 怎么收尾。每行一个动作。
+    """
     return "\n".join([
         f"已选：{_cand_title(cand)}",
-        "",
         f"当前：{opts_summary(opts, site_total=site_total, plan_text=plan_text)}",
         "",
-        "要改就回一句，一次改一样（也可以一条全带）：",
-        "· 集数：「从5集」或「5-8集」",
-        "· 站点：「站点馒头」或「站点馒头,岛」",
-        "· 刷新：「每天3:00」「每30分钟」「每周三21:30」，想先下一轮加「立即」",
+        "改一项回一句，方括号包起来（不包也认）：",
+        "集数 [从5集] 或 [5-8集]",
+        "站点 [站点馒头]（多个逗号：[站点馒头,岛]）",
+        "清晰度 [1080P] / [4K] / [720P]",
+        "刷新 [每天3:00] / [每30分钟] / [每周三21:30]",
         "",
-        "不改就回「确定」，我按上面的设置建订阅并立刻补搜一轮。",
+        "不改就回「确定」，我按上面设置建订阅并立刻补搜一轮。",
     ])
 
 
@@ -360,7 +498,7 @@ def render_opts_state(
     return "\n".join([
         f"已记下：{_cand_title(cand)}",
         f"当前：{opts_summary(opts, site_total=site_total, plan_text=plan_text)}",
-        "回「确定」开始；还能接着改集数 / 站点 / 刷新时间。",
+        "回「确定」开始；还能接着改 [从5集] [站点馒头] [每天3:00]。",
     ])
 
 
@@ -374,10 +512,10 @@ def render_no_choice(key: str = "sub") -> str:
 def render_intent_hint(kind: str) -> str:
     """用户只发了动词（订阅 / 找资源）没带片名时怎么用。"""
     if kind == "find":
-        return ("用法：找资源 片名 —— 只搜一轮直接下，不建订阅。\n"
-                "例：找资源 仙逆 / 找资源 仙逆 5-8集 / 找资源 仙逆 站点馒头")
-    return ("用法：订阅 片名 —— 列同名作品让你选，选完再定集数/站点/刷新时间。\n"
-            "例：订阅 天才女友 / 订阅 仙逆 从5集 站点馒头 每天3:00")
+        return ("用法：查资源 片名 站点 清晰度 —— 列资源后回序号直接下，不建订阅。\n"
+                "例：查资源 天下第一 观众 / 查资源 仙逆 馒头 1080P")
+    return ("用法：订阅 片名 站点 清晰度 周期 —— 一条说全，最省事。\n"
+            "例：订阅 天下第一 观众 1080P 周一5:30")
 
 
 def split_intent(text: str) -> tuple[str, str]:
@@ -394,7 +532,8 @@ def split_intent(text: str) -> tuple[str, str]:
     s = re.sub(r"^/\s*[A-Za-z]+\s*", "", s).strip()
     s = re.sub(r"^(?:帮我|帮忙|麻烦|请|给我|我要|我想|想)\s*", "", s).strip()
     for verbs, kind in (
-        (("找资源", "找片", "搜资源", "找一下资源", "搜索资源"), "find"),
+        (("找资源", "找片", "搜资源", "找一下资源", "搜索资源",
+          "查资源", "查片", "查一下资源"), "find"),
         (("直接下载", "直接下", "下载这个", "只下载"), "find"),
         (("订阅", "追剧", "追番", "追更", "添加订阅", "订上"), "sub"),
     ):
@@ -421,7 +560,11 @@ def render_candidates(
     limit: int = MAX_CANDIDATES,
     with_hint: bool = True,
 ) -> str:
-    """列候选：每部两行（年份 · 剧集/电影 · 集数，加一行简介），末尾给下一步指令。"""
+    """列候选：每部一行（标题 · 年份 · 剧集/电影 · 集数），末尾给下一步指令。
+
+    刻意不带 TMDB 简介：手机聊天里一堆截断的简介只会刷屏，用户扫一眼标题
+    + 年份 + 类型就能选出要的那部。
+    """
     items = list(cands)[:limit]
     lines = [f"「{query}」找到 {len(items)} 个同名作品，回序号选："]
     for i, c in enumerate(items, 1):
@@ -434,11 +577,8 @@ def render_candidates(
             bits.append(f"{eps}集")
         title = c.get("title") or c.get("meta_title") or ""
         lines.append(f"{i}. {title}（{' · '.join(bits)}）")
-        brief = _short(str(c.get("overview") or ""))
-        if brief:
-            lines.append(f"   {brief}")
     if with_hint:
-        lines.append("回序号选（如「1」），选完再定：从第几集开始 / 用哪些站 / 多久刷一次。")
+        lines.append("回序号选（如 1，或整条 [1] [从5集] [站点馒头] [每天3:00]）")
     return "\n".join(lines)
 
 
@@ -506,7 +646,10 @@ def render_sub_created(sub: dict, **extra: Any) -> str:
     if not sites:
         n = len(sub.get("site_ids") or [])
         sites = f"{n} 个站点" if n else "未选站点"
+    res = (sub.get("rules") or {}).get("resolutions") or []
     lines = [f"已订阅：{name}（{' · '.join(bits)}）", f"站点：{sites}"]
+    if res:
+        lines.append(f"清晰度：{', '.join(str(x).upper() for x in res)}")
     plan = extra.get("plan") or ""
     if plan:
         lines.append(f"计划：{plan}")
@@ -520,9 +663,10 @@ def render_help() -> str:
     """第一次用或发错时的用法速查（尽量短）。"""
     return "\n".join([
         "【定时订阅下载】",
-        "直接说：订阅 天才女友 —— 不用打斜杠，回序号后选集数/站点/刷新时间",
-        "只下一次：找资源 仙逆 —— 列资源后回 1 或 1-3 直接下，不建订阅",
-        "带参数一条搞定：/ptsub 片名 从5集 站点馒头 每天3:00",
+        "订阅 片名 站点 清晰度 周期 —— 一条说全：订阅 天下第一 观众 1080P 周一5:30",
+        "建好订阅会先搜一轮，把能下的资源列出来：回 [1] 就下这条，回「不用」只挂着订阅",
+        "列完候选回 [1] [从5集] [站点馒头] [每天3:00] —— 方括号可有可无",
+        "查资源 片名 站点 清晰度 —— 只列资源不下订阅，回 [1] 或 [1-3] 直接下",
         "/ptlist 看订阅进度；/ptsub help 看这条",
     ])
 
@@ -551,4 +695,6 @@ def render_sub_list(subs: Iterable[dict], *, limit: int = 10) -> str:
 
 
 _WEEK = {"一": "mon", "二": "tue", "三": "wed", "四": "thu",
-         "五": "fri", "六": "sat", "日": "sun", "天": "sun"}
+         "五": "fri", "六": "sat", "日": "sun", "天": "sun",
+         "1": "mon", "2": "tue", "3": "wed", "4": "thu",
+         "5": "fri", "6": "sat", "7": "sun"}

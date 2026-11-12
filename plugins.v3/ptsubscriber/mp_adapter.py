@@ -47,6 +47,7 @@ class MPBridge:
     def __init__(self, logger: Any = None) -> None:
         self.logger = logger
         self.cache = SearchCache()
+        self._search_timeout = 120.0
 
     def _log(self, level: str, text: str) -> None:
         log = self.logger
@@ -67,30 +68,153 @@ class MPBridge:
             domain = str(getattr(site, "domain", "") or "").strip()
             if not domain:
                 continue
+            # 只暴露「有没有配凭据」，绝不回传 cookie / apikey / token 内容
+            has_auth = bool(
+                str(getattr(site, "cookie", "") or "").strip()
+                or str(getattr(site, "apikey", "") or "").strip()
+                or str(getattr(site, "token", "") or "").strip()
+            )
             out.append({
+                # 兼容旧约定：id 沿用域名；MP 真实站点 id 放在 sid，供官方搜索链使用
                 "id": domain,
+                "sid": int(getattr(site, "id", 0) or 0),
                 "domain": domain,
                 "name": str(getattr(site, "name", "") or domain),
                 "pri": int(getattr(site, "pri", 0) or 0),
                 "is_active": bool(getattr(site, "is_active", True)),
+                "has_auth": has_auth,
                 "has_rss": bool(getattr(site, "rss", "")),
                 "downloader": str(getattr(site, "downloader", "") or ""),
             })
         return out
 
-    def searchable_domains(self) -> set[str]:
+    @staticmethod
+    def _normalize_domain(value: object) -> str:
+        """把索引器里的 domain 字段归一化为纯域名。
+
+        这版 MP 的索引器字典里 `domain` 可能为空、只剩整数 `id`；直接
+        `str(id)` 会得到 "12" 这类值，混进域名集合后会让所有站点都匹配不上，
+        于是误报「认证没做好」。这里只保留看起来像域名的值。
+        """
+        text = str(value or "").strip().lower()
+        if not text:
+            return ""
+        if "://" in text:
+            text = text.split("://", 1)[1]
+        text = text.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+        text = text.split(":", 1)[0].lstrip(".")
+        # 纯数字（索引器 id）不是域名，直接丢弃
+        if "." not in text:
+            return ""
+        return text
+
+    @staticmethod
+    def _domain_variants(value: object) -> set[str]:
+        """域名的等价写法：原样、去掉 www.、补上 www.（覆盖 kp./www. 这类前缀差）。"""
+        base = MPBridge._normalize_domain(value)
+        if not base:
+            return set()
+        out = {base}
+        if base.startswith("www."):
+            out.add(base[4:])
+        else:
+            out.add("www." + base)
+        return out
+
+    def _indexers(self) -> list[dict]:
+        """读 MP 的索引器清单；同步接口读不到时用异步接口补一次。"""
         try:
             from app.sdk.network import SitesHelper
 
-            domains: set[str] = set()
-            for item in SitesHelper().get_indexers() or []:
-                value = item.get("domain") or item.get("id") or ""
-                if value:
-                    domains.add(str(value).strip().lower())
-            return domains
-        except Exception as exc:
+            helper = SitesHelper()
+            items = [i for i in (helper.get_indexers() or []) if isinstance(i, dict)]
+            if items:
+                return items
+            # 这版 MP 的索引资源是异步懒加载的，插件在同步上下文里常常读到空
+            try:
+                import asyncio
+
+                async def _load() -> list:
+                    return [i for i in (await helper.async_get_indexers() or []) if isinstance(i, dict)]
+
+                def _run() -> list:
+                    return asyncio.run(_load())
+
+                result: list = []
+                thread = threading.Thread(target=lambda: result.extend(_run()), daemon=True)
+                thread.start()
+                thread.join(timeout=8)
+                return result
+            except Exception:
+                return []
+        except Exception as exc:  # noqa: BLE001
             self._log("debug", f"读取站点索引配置失败（忽略）：{type(exc).__name__}")
-            return set()
+            return []
+
+    def searchable_domains(self) -> set[str]:
+        """MP 索引器认识的站点域名（含 www. 等价写法）。
+
+        返回空集合表示「读不到 / 无法判定」，调用方应当放过而不是拦住。
+        """
+        domains: set[str] = set()
+        for item in self._indexers():
+            domains |= self._domain_variants(item.get("domain"))
+        return domains
+
+    def resolve_domain(self, domain: str) -> str:
+        """返回 MP 真正认得的站点域名，用于 browse。
+
+        站点表里的 domain 与索引器里的 domain 可能差一个前缀（www. / kp.），
+        直接拿站点表的写法去 browse 会被 MP 判成「站点不存在」。
+        """
+        target = self._normalize_domain(domain)
+        if not target:
+            return str(domain or "")
+        try:
+            from app.sdk.network import SitesHelper
+
+            helper = SitesHelper()
+            for cand in (target, "www." + target):
+                try:
+                    if helper.get_indexer(cand):
+                        return cand
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        variants = self._domain_variants(target)
+        for item in self._indexers():
+            candidate = self._normalize_domain(item.get("domain"))
+            if not candidate:
+                continue
+            if candidate in variants or candidate.endswith("." + target) or target.endswith("." + candidate):
+                return candidate
+        return target
+
+    def has_indexer(self, domain: str) -> bool:
+        """MP 是否认识这个站（用于「搜不到」时给出准确原因）。"""
+        target = self.resolve_domain(domain)
+        try:
+            from app.sdk.network import SitesHelper
+
+            if SitesHelper().get_indexer(target):
+                return True
+        except Exception:
+            pass
+        if not self._indexers():
+            # 清单读不到 -> 无法判定，按「认」处理
+            return True
+        return target in self.searchable_domains()
+
+    def can_search(self, domain: str) -> bool:
+        """能否搜索。只做宽松判断：读不到索引器清单、或站点有等价域名时都放行。
+
+        经验：把「索引器清单里没有」当成「搜不了」会大面积误伤（站点表与索引器的
+        域名写法经常差一个 www./kp. 前缀），真正的失败原因交给真实搜索去暴露。
+        """
+        if not self._normalize_domain(domain):
+            return False
+        return True
 
     # ---------------------------------------------------------------- 下载器
     def list_downloaders(self) -> list[dict]:
@@ -132,38 +256,126 @@ class MPBridge:
         return {"ok": not inactive, "message": "连接正常" if not inactive else "下载器未连接",
                 "version": version}
 
-    # ---------------------------------------------------------------- 搜索
-    def search(self, domains: list[str], keyword: str, limit: int = 50) -> dict:
-        """按站点域名调用 MP 的 TorrentsChain.browse，返回富信息卡片 + 服务端 token。"""
-        from app.chain.torrents import TorrentsChain
+    # ---------------------------------------------------------------- 异步桥
+    def _run_async(self, coro_factory, timeout: float = 60.0):
+        """同步上下文里跑 MP 的 async 链。coro_factory 返回协程。"""
+        import asyncio
 
-        chain = TorrentsChain()
+        result: list = []
+
+        def _run() -> None:
+            try:
+                result.append(asyncio.run(coro_factory()))
+            except Exception as exc:  # noqa: BLE001
+                result.append(exc)
+
+        thread = threading.Thread(target=_run, daemon=True)
+        thread.start()
+        thread.join(timeout=timeout)
+        if not result:
+            raise TimeoutError(f"MP 搜索超时（>{timeout}s）")
+        value = result[0]
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    def auth_level(self) -> int:
+        """MP 系统级用户认证级别；<2 表示未通过（站点功能被整体禁用）。
+
+        这是 MP V3.14 的隐藏门槛：认证不过时索引器清单为空、所有站点都搜不到，
+        但用户侧的站点认证（cookie/apikey）可能是好的——这正是「认证好了却搜不了」的根源。
+        读取失败返回 -1（调用方按「无法判定」处理，不要据此拦截）。
+        """
+        try:
+            from app.sdk.network import SitesHelper
+
+            return int(SitesHelper().auth_level or 0)
+        except Exception:
+            return -1
+
+    def resolve_site_ids(self, sites) -> list[int]:
+        """把「站点域名 或 站点id」统一解析成 MP 真实站点 id（整数）。
+
+        域名与 MP 站点地址的主机名可能差前缀（m-team.cc vs kp.m-team.cc），
+        但站点 id 是权威的，官方搜索链按 id 走，能彻底避开前缀匹配问题。
+        """
+        result: list[int] = []
+        seen: set[int] = set()
+        by_domain = {str(s.get("domain") or "").lower(): s.get("sid")
+                     for s in self.list_sites()}
+        for item in sites or []:
+            sid = None
+            if isinstance(item, int):
+                sid = item
+            elif isinstance(item, str) and item.strip():
+                key = item.strip().lower()
+                sid = by_domain.get(key)
+                if not sid:
+                    # 站名也可能被直接传进来
+                    for s in self.list_sites():
+                        if str(s.get("name") or "").strip().lower() == key:
+                            sid = s.get("sid")
+                            break
+            if sid and int(sid) > 0 and int(sid) not in seen:
+                seen.add(int(sid))
+                result.append(int(sid))
+        return result
+
+    # ---------------------------------------------------------------- 搜索
+    def search(self, sites, keyword: str, limit: int = 50) -> dict:
+        """按 MP 官方搜索链执行，返回富信息卡片 + 服务端 token。
+
+        `sites` 可以是站点 id（int）或域名（str）的混合；插件只做交互层，
+        真正的搜索与站点有效性判断全部交给 MP（SearchChain.search_by_title）。
+        这样插件不会再出现「自己判成搜不了、MP 实际能搜」的错位。
+        """
+        from app.chain.search.facade import SearchChain
+
+        site_ids = self.resolve_site_ids(sites)
         items: list[dict] = []
         raw_by_key: dict[str, Any] = {}
         errors: list[dict] = []
-        # browse 依赖 SitesHelper().get_indexer(domain)。MP 未完成「用户认证」时索引器为空，
-        # browse 会静默返回 []，容易被误判为「没有资源」，因此先做一次显式诊断。
-        if not self.searchable_domains():
-            errors.append({
-                "domain": "*",
-                "message": "MoviePilot 当前没有可用的站点索引器（日志提示「用户未认证」）。"
-                           "请先在 MP 里完成用户认证并确认站点已启用，否则搜索会返回 0 条。",
-            })
-        for domain in domains:
+        if not site_ids:
+            errors.append({"domain": ",".join(str(s) for s in (sites or [])),
+                           "message": "没有匹配到 MP 站点"})
+            return {"token": self.cache.put(raw_by_key), "items": items, "errors": errors}
+
+        chain = SearchChain()
+        contexts: list = []
+        try:
+            # 同步门面：与 MP 自己搜索页走同一套逻辑（按站点 id，最权威）
+            contexts = chain.search_by_title(
+                title=keyword or "", sites=site_ids, cache_local=True) or []
+        except Exception as exc:  # noqa: BLE001 - 事件循环冲突时退回异步门面
+            self._log("debug", f"同步搜索失败，改用异步门面：{type(exc).__name__}: {exc}")
             try:
-                infos = chain.browse(domain=domain, keyword=keyword or None) or []
-            except Exception as exc:
-                errors.append({"domain": domain, "message": f"{type(exc).__name__}: {exc}"[:160]})
+                contexts = self._run_async(
+                    lambda: chain.async_search_by_title(
+                        title=keyword or "", sites=site_ids, cache_local=True),
+                    timeout=self._search_timeout,
+                ) or []
+            except Exception as exc2:  # noqa: BLE001
+                errors.append({"domain": ",".join(map(str, site_ids)),
+                               "message": f"{type(exc2).__name__}: {exc2}"[:160]})
+                contexts = []
+
+        for ctx in contexts:
+            info = getattr(ctx, "torrent_info", None)
+            if info is None and isinstance(ctx, dict):
+                info = ctx.get("torrent_info")
+            if info is None:
                 continue
-            for info in infos[:limit]:
-                raw = _torrent_to_raw(info)
-                # 用 MP 给的站点中文名（如「馒头」），没有才退回域名
-                card = enrich_item(domain, str(getattr(info, "site_name", "") or domain), raw)
-                key = card["key"]
-                if key in raw_by_key:
-                    continue
-                raw_by_key[key] = info
-                items.append(card)
+            raw = _torrent_to_raw(info)
+            site_name = str(getattr(info, "site_name", "") or "")
+            # 站点名来自 MP 结果本身（权威）；domain 只用作去重 key
+            card = enrich_item(site_name or "", site_name, raw)
+            key = card["key"]
+            if key in raw_by_key:
+                continue
+            raw_by_key[key] = info
+            items.append(card)
+            if len(items) >= limit:
+                break
         token = self.cache.put(raw_by_key)
         return {"token": token, "items": items, "errors": errors}
 

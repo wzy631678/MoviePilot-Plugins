@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import re
+import threading
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import Body
@@ -93,8 +95,8 @@ def build_trigger(sub: dict, tz: str):
 
 class PtSubscriber(_PluginBase):
     plugin_name = "定时订阅下载"
-    plugin_desc = "自己选周几几点，到指定站点搜资源并按详细规则下载到指定容器；自动对接 TMDB，按片名、年份、剧集/电影、集数逐项比对，只把真正这部排在最前。聊天入口不用打斜杠：直接说「订阅 天才女友」就列同名作品，回序号后选「从第几集 / 哪些站 / 多久刷一次」，回「确定」立刻补搜；「找资源 仙逆」只搜一轮直接下，不建订阅。斜杠命令 /ptsub、/ptfind、/ptlist 一样可用；回复全是纯文本不带图。"
-    plugin_version = "1.5.0"
+    plugin_desc = "自己选周几几点，到指定站点搜资源并按详细规则下载到指定容器；自动对接 TMDB，按片名、年份、剧集/电影、集数逐项比对，只把真正这部排在最前。聊天入口不用打斜杠，一条说全最省事：「订阅 天下第一 观众 1080P 周一5:30」（片名/站点/清晰度/周期顺序随意）；也可以只发「订阅 天才女友」先列同名作品，回序号后再选「从第几集 / 哪些站 / 多久刷一次」，回「确定」立刻补搜并把能下的资源列出来让你挑；「查资源 仙逆 馒头 1080P」只搜一轮直接下，不建订阅。斜杠命令 /ptsub、/ptfind、/ptlist 一样可用；回复全是纯文本不带图。"
+    plugin_version = "1.8.0"
     plugin_author = "wzy"
     plugin_config_prefix = "ptsubscriber_"
     plugin_order = 90
@@ -161,10 +163,35 @@ class PtSubscriber(_PluginBase):
         except Exception as exc:
             parts.append(f"下载器读取失败 {type(exc).__name__}: {str(exc)[:80]}")
         try:
-            parts.append(f"可搜索索引 {len(self.bridge.searchable_domains())} 个")
-        except Exception as exc:
+            indexers = self.bridge._indexers()
+            parts.append(f"索引器 {len(indexers)} 条")
+        except Exception as exc:  # noqa: BLE001
             parts.append(f"索引读取失败 {type(exc).__name__}: {str(exc)[:80]}")
         logger.info(f"[{self.plugin_name}] 数据源自检：" + "；".join(parts))
+        for line in self._index_diag():
+            logger.info(f"[{self.plugin_name}] {line}")
+
+    def _index_diag(self) -> list[str]:
+        """排障：MP 用户认证级别 + 索引器/站点数量（只打数量与状态，不含凭据）。"""
+        out: list[str] = []
+        try:
+            indexers = self.bridge._indexers()
+            sites = self.bridge.list_sites()
+            level = self.bridge.auth_level()
+        except Exception as exc:  # noqa: BLE001
+            return [f"索引诊断失败 {type(exc).__name__}: {str(exc)[:120]}"]
+        out.append(f"用户认证级别 {level}（≥2 才可搜）；索引器 {len(indexers)} 条；站点 {len(sites)} 个")
+        if level == -1:
+            out.append("用户认证级别读取失败（不影响搜索，交由 MP 判断）")
+        elif level < 2:
+            out.append("MP 系统级用户认证未通过：站点功能被临时禁用，搜索会返回空。"
+                       "这是「站点认证好了却搜不了」的真正原因")
+        mt = [s for s in sites if "m-team" in str(s.get("domain") or "").lower()]
+        if mt:
+            s = mt[0]
+            out.append(f"馒头 sid={s.get('sid')} active={s.get('is_active')} "
+                       f"认证={'有' if s.get('has_auth') else '无'}")
+        return out
 
     def stop_service(self) -> None:
         try:
@@ -198,8 +225,8 @@ class PtSubscriber(_PluginBase):
     def get_command() -> List[Dict[str, Any]]:
         """注册远程命令（QQ / 微信 / TG 里直接发，穿透到插件，不走 MP 自带订阅）。
 
-        /ptsub  片名 → 查同名作品、回序号建订阅（可带 从N集 / 站点X / 每天3:00 / 立即）
-        /ptfind 片名 → 只找资源直接下发下载器，不建订阅
+        /ptsub  片名 站点 清晰度 周期 → 一条建订阅（如：天下第一 观众 1080P 周一5:30）
+        /ptfind 片名 站点 清晰度 → 只找资源直接下发下载器，不建订阅
         /ptlist      → 看自己有哪些订阅、下到第几集
         """
         try:
@@ -403,8 +430,11 @@ class PtSubscriber(_PluginBase):
             entry["found"] = len(passed)
             if not passed:
                 wait = self._schedule_retry(sid, sub)
+                level = self.bridge.auth_level()
+                auth_note = ("（MP 用户认证临时未通过，站点功能被禁用，会自动重试）"
+                             if 0 <= level < 2 else "")
                 entry.update(status="waiting", site=self._site_names(domains),
-                             message=f"{entry['target']}还没更新；{wait}")
+                             message=f"{entry['target']}还没更新{auth_note}；{wait}")
                 self._finish(sub, entry)
                 return
             # 追更只挑一个版本；单片也只要一个；补老剧才一次收多条（每集留一个）
@@ -488,15 +518,22 @@ class PtSubscriber(_PluginBase):
         except Exception as exc:  # 通知失败绝不影响补搜本身
             logger.warning(f"[{self.plugin_name}] 通知发送失败：{type(exc).__name__}: {exc}")
 
-    def _site_names(self, domains: list[str]) -> str:
-        """域名 → MP 里的站点中文名，日志和通知里看着更直观。"""
-        if not domains:
+    def _site_names(self, site_ids: list) -> str:
+        """站点 id / 域名 → MP 里的站点中文名，日志和通知里看着更直观。"""
+        if not site_ids:
             return ""
         try:
-            mapping = {s.get("domain"): s.get("name") for s in self.bridge.list_sites()}
+            sites = self.bridge.list_sites()
+            by_sid = {int(s.get("sid") or 0): s.get("name") for s in sites}
+            by_domain = {s.get("domain"): s.get("name") for s in sites}
         except Exception:
-            mapping = {}
-        names = [str(mapping.get(d) or d) for d in domains]
+            by_sid, by_domain = {}, {}
+        names = []
+        for x in site_ids:
+            if isinstance(x, int):
+                names.append(str(by_sid.get(x) or x))
+            else:
+                names.append(str(by_domain.get(x) or x))
         head = "、".join(names[:3])
         return head + (f" 等 {len(names)} 个" if len(names) > 3 else "")
 
@@ -812,14 +849,39 @@ class PtSubscriber(_PluginBase):
             text = f"处理失败：{type(exc).__name__}: {str(exc)[:120]}"
         self._remote_post(channel, source, user, text)
 
-    def _remote_post(self, channel=None, source=None, user=None, text: str = "") -> None:
-        """把结果回发给触发入口（QQ / TG / 微信等）。通知失败不影响业务本身。"""
+    def _remote_post(self, channel=None, source=None, user=None, text: str = "",
+                     username=None) -> None:
+        """把结果回发给触发入口（QQ / TG / 微信等），与 MP 原生交互回复完全一致。
+
+        关键点（对照 ``app/chain/interaction.py`` 的原生回复）：
+
+        - 正文走 ``title``：QQ / TG 等渠道按聊天消息渲染，``text`` 在部分渠道会被截断或折叠；
+        - ``save_history=False``：这是交互回执，不该混进「设置 → 通知」历史；
+        - 带上 ``username``：部分渠道按昵称展示；
+        - 不附加插件页链接：避免在聊天里显示成一张通知卡片。
+
+        失败时退回插件通知链路（``_PluginBase.post_message``），再失败只记日志，
+        绝不影响业务本身。
+        """
         if not text:
             return
         try:
+            from app.schemas.message import Message as _Message
+
+            # 只传 title、不传 text：与 MP 原生交互回复完全一致。
+            # 关键：qqmsg 等渠道的 send 会按 `title + "\\n" + text` 拼正文，
+            # 若同时传两者会把同一份内容重复渲染一遍（用户实测见站点报错重复）。
+            self.chain.post_message(_Message(
+                channel=channel, source=source, userid=user, username=username,
+                title=text, save_history=False,
+            ))
+            return
+        except Exception as exc:  # noqa: BLE001 - 消息模型不可用时退回通知链路
+            logger.debug(f"[{self.plugin_name}] 直发回复不可用，退回通知链路：{type(exc).__name__}: {exc}")
+        try:
             self.post_message(channel=channel, source=source, userid=user,
-                              title="【定时订阅下载】", text=text)
-        except Exception as exc:
+                              username=username, title=text, text=text)
+        except Exception as exc:  # noqa: BLE001 - 回执失败不影响订阅
             logger.warning(f"[{self.plugin_name}] 远程回复发送失败：{type(exc).__name__}: {exc}")
 
     # ------------------------------------------- 接管聊天渠道的普通文本（不带斜杠）
@@ -831,7 +893,7 @@ class PtSubscriber(_PluginBase):
 
         - 「订阅 天才女友」「找资源 仙逆」：不用打斜杠，直接进插件流程
         - 列完候选后回「1」「1-3」：进第二屏选集数 / 站点 / 刷新时间
-        - 第二屏里回「从5集」「站点馒头」「每30分钟」「确定」
+        - 第二屏里回「[从5集]」「[站点馒头]」「[每30分钟]」「确定」
 
         其余聊天内容返回 False，原样交给宿主处理，行为与没装插件时一致。
         """
@@ -840,36 +902,53 @@ class PtSubscriber(_PluginBase):
             return False
         key = self._remote_key(channel, source, userid)
         self._pending_prune()
+        logger.info(f"[{self.plugin_name}] 收到聊天文本：{raw!r}（channel={channel} source={source} user={userid}）")
 
         # 刚搜完资源，用户回「订阅」= 把这部改成追更，不能当成新一次订阅查询
         if self._pending_dl.get(key) and raw in ("订阅", "订阅它", "订阅这个", "追更", "改订阅"):
-            self._remote_post(channel, source, userid, self.remote_dl_subscribe(key=key))
+            self._remote_post(channel, source, userid, self.remote_dl_subscribe(key=key), username=username)
             return True
 
         kind, rest = remote_ui.split_intent(raw)
         if kind:
+            logger.info(f"[{self.plugin_name}] 识别为 {kind} 入口，片名={rest!r}，开始列候选")
             if not rest:
-                self._remote_post(channel, source, userid, remote_ui.render_intent_hint(kind))
+                self._remote_post(channel, source, userid, remote_ui.render_intent_hint(kind), username=username)
                 return True
-            text_out = (self.remote_find(rest, key=key) if kind == "find"
-                        else self.remote_sub(rest, key=key))
-            self._remote_post(channel, source, userid, text_out)
+            try:
+                text_out = (self.remote_find(rest, key=key) if kind == "find"
+                            else self.remote_sub(rest, key=key))
+            except Exception as exc:  # noqa: BLE001 - 出错也要接管，别让它掉回 MP 原生订阅
+                logger.warning(f"[{self.plugin_name}] {kind} 处理失败：{type(exc).__name__}: {exc}")
+                text_out = (f"处理「{raw}」时出错：{type(exc).__name__}: {str(exc)[:150]}\n"
+                            f"可以再发一次，或用斜杠命令 /ptsub {rest}（不受此影响）。")
+            self._remote_post(channel, source, userid, text_out, username=username)
             return True
 
         pending = self._pending.get(key)
         if pending:
-            text_out = self._intercept_pending(pending, key, raw)
+            logger.info(f"[{self.plugin_name}] 待选状态：stage={pending.get('stage')}，收到 {raw!r}")
+            try:
+                text_out = self._intercept_pending(pending, key, raw)
+            except Exception as exc:  # noqa: BLE001 - 回序号出错也要接管，别掉回 MP 原生
+                logger.warning(f"[{self.plugin_name}] 回序号处理失败：{type(exc).__name__}: {exc}")
+                text_out = f"处理「{raw}」时出错：{type(exc).__name__}: {str(exc)[:120]}；发「取消」可重新开始。"
             if text_out is None:
                 return False
-            self._remote_post(channel, source, userid, text_out)
+            self._remote_post(channel, source, userid, text_out, username=username)
             return True
 
         dl = self._pending_dl.get(key)
         if dl:
-            text_out = self._intercept_dl(dl, key, raw)
+            logger.info(f"[{self.plugin_name}] 待下资源状态，收到 {raw!r}")
+            try:
+                text_out = self._intercept_dl(dl, key, raw)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[{self.plugin_name}] 资源选择处理失败：{type(exc).__name__}: {exc}")
+                text_out = f"处理「{raw}」时出错：{type(exc).__name__}: {str(exc)[:120]}；发「取消」可重新开始。"
             if text_out is None:
                 return False
-            self._remote_post(channel, source, userid, text_out)
+            self._remote_post(channel, source, userid, text_out, username=username)
             return True
         return False
 
@@ -884,7 +963,7 @@ class PtSubscriber(_PluginBase):
         if pending.get("stage") == "opts":
             if remote_ui.is_confirm(raw):
                 return self.remote_confirm(key)
-            intent = remote_ui.parse_intent(raw)
+            intent = remote_ui.parse_intent(raw, site_names=self._site_labels())
             known = any(intent.get(f) for f in (
                 "ep_start", "ep_end", "sites", "schedule_mode", "pick"))
             if intent.get("name") and not known:
@@ -895,21 +974,26 @@ class PtSubscriber(_PluginBase):
         picks = remote_ui.pick_rows(raw, len(cands), multi=False)
         if picks:
             return self.remote_pick(picks[0], key=key)
-        # 「1 从5集 站点馒头」：序号 + 参数一条带全，直接建，省掉第二屏
-        m = re.match(r"^(\d{1,3})\s*([^\d\-~—,，].*)$", raw)
-        if m:
-            idx = int(m.group(1))
-            if 1 <= idx <= len(cands):
-                return self.remote_pick(idx, key=key,
-                                        opts=remote_ui.parse_intent(m.group(2)))
-        intent = remote_ui.parse_intent(raw)
+        # 「1 从5集 站点馒头」/「[1] [从5集] [站点馒头]」：序号 + 参数一条带全，
+        # 直接建订阅，省掉第二屏
+        idx, rest = remote_ui.split_pick(raw)
+        if idx is not None and 1 <= idx <= len(cands):
+            return self.remote_pick(idx, key=key,
+                                    opts=remote_ui.parse_intent(rest, site_names=self._site_labels()) if rest else None)
+        intent = remote_ui.parse_intent(raw, site_names=self._site_labels())
         if any(intent.get(f) for f in ("ep_start", "ep_end", "sites", "schedule_mode")):
-            return f"先回序号告诉我要哪一部（1 ~ {len(cands)}），再说集数和站点。"
+            return (f"先回序号告诉我要哪一部（1 ~ {len(cands)}），再说集数和站点。\n"
+                    "也可以一条发：[2] [从5集] [站点馒头] [每天3:00]")
         return None
 
     def _intercept_dl(self, pending: Dict[str, Any], key: str,
                       raw: str) -> Optional[str]:
         """找资源流程里的回序号 / 转订阅；返回 None 表示这条不该插件管。"""
+        preview_skip = ("不用", "不下了", "跳过", "先不下", "只订阅", "自动", "算了", "0")
+        # 「订阅已建好、顺便列了资源」这一屏：回「不用」只是不现在下，订阅照旧挂着
+        if pending.get("mode") == "preview" and raw in preview_skip:
+            self._pending_dl.pop(key, None)
+            return "好，只挂着订阅。到计划时间我自动搜并下发，不用再管。"
         if raw in self._CANCEL_WORDS:
             self._pending_dl.pop(key, None)
             return "已取消这次下载选择。要重搜就发「找资源 片名」。"
@@ -944,7 +1028,7 @@ class PtSubscriber(_PluginBase):
             handled = self._intercept_pending(pending, key, text)
             if handled is not None:
                 return handled
-        intent = remote_ui.parse_intent(text)
+        intent = remote_ui.parse_intent(text, site_names=self._site_labels())
         if intent.get("list_sites") and not intent.get("name"):
             return self._remote_sites_text()
         if intent.get("pick") is not None:
@@ -965,7 +1049,7 @@ class PtSubscriber(_PluginBase):
         name = (name or "").strip()
         if not name:
             return ("没有收到片名。用法：/ptsub 片名；带参数例："
-                    "/ptsub 天下第一 从5集 站点馒头 立即")
+                    "/ptsub 天下第一 [从5集] [站点馒头] [立即]")
         opts = dict(opts or {})
         extra, msg = self._resolve_sites_or_msg(opts.get("sites") or [])
         if msg:
@@ -998,8 +1082,7 @@ class PtSubscriber(_PluginBase):
                 plan_text=self._default_plan_text())
         if len(cands) == 1:
             c = cands[0]
-            sub = self._remote_create(name, c["kind"], c["tmdb_id"], opts)
-            return self._remote_confirmed(sub, opts)
+            return self._create_with_preview(name, c["kind"], c["tmdb_id"], opts, key)
 
         self._pending[key] = {"name": name, "kind": want_kind,
                               "candidates": cands, "opts": opts, "at": self._now_ts()}
@@ -1015,7 +1098,7 @@ class PtSubscriber(_PluginBase):
         什么参数都没带时先**不建订阅**，而是进入第二屏让用户选
         「从第几集开始 / 用哪些站 / 多久刷一次」——这正是用户要的
         「回 1 → 跳出去选集数和订阅时间」。
-        如果用户在同一条消息里带了参数（「1 从5集 站点馒头 每天3:00」），
+        如果用户在同一条消息里带了参数（「[1] [从5集] [站点馒头] [每天3:00]」），
         就直接按参数建，省一轮。
         """
         self._pending_prune()
@@ -1036,7 +1119,7 @@ class PtSubscriber(_PluginBase):
                 continue
             if value not in (None, [], "", False):
                 merged[field] = value
-        # 用户可能在「回序号」这条消息里才补参数（如「2 从7集 站点馒头」）
+        # 用户可能在「回序号」这条消息里才补参数（如「[2] [从7集] [站点馒头]」）
         if merged.get("sites"):
             extra, msg = self._resolve_sites_or_msg(merged["sites"])
             if msg:
@@ -1058,9 +1141,8 @@ class PtSubscriber(_PluginBase):
                 c, opts=merged, site_total=self._site_total(),
                 plan_text=self._default_plan_text())
         self._pending.pop(key, None)
-        sub = self._remote_create(pending.get("name") or c["title"], c["kind"],
-                                  c["tmdb_id"], merged)
-        return self._remote_confirmed(sub, merged)
+        return self._create_with_preview(pending.get("name") or c["title"], c["kind"],
+                                         c["tmdb_id"], merged, key)
 
     def remote_opt(self, text: str, key: str = "") -> str:
         """第二屏里改一项：集数 / 站点 / 刷新时间，累加到待建参数上。"""
@@ -1068,7 +1150,7 @@ class PtSubscriber(_PluginBase):
         pending = self._pending.get(key)
         if not pending or pending.get("stage") != "opts":
             return remote_ui.render_no_choice()
-        intent = remote_ui.parse_intent(text)
+        intent = remote_ui.parse_intent(text, site_names=self._site_labels())
         merged = dict(pending.get("opts") or {})
         cands = pending.get("candidates") or []
         # 顺手允许重选候选（如「3」）
@@ -1079,7 +1161,8 @@ class PtSubscriber(_PluginBase):
             pending["chosen"] = cands[idx - 1]
         before = dict(merged)
         for field in ("ep_start", "ep_end", "season", "schedule_mode",
-                      "schedule_time", "schedule_interval", "schedule_weekday"):
+                      "schedule_time", "schedule_interval", "schedule_weekday",
+                      "resolution"):
             value = intent.get(field)
             if value not in (None, "", [], 0):
                 merged[field] = value
@@ -1092,8 +1175,8 @@ class PtSubscriber(_PluginBase):
             merged.update(extra)
             merged["site_names"] = self._site_names(merged.get("site_ids") or [])
         if merged == before and pending.get("chosen") is not None and not intent.get("pick"):
-            return ("没看出要改哪一项。回「从5集」「站点馒头」「每天3:00」「每30分钟」"
-                    "这类，或回「确定」直接建。\n"
+            return ("没看出要改哪一项。回 [从5集] [站点馒头] [1080P] [每天3:00] "
+                    "[每30分钟] 这类，或回「确定」直接建。\n"
                     + remote_ui.render_pick_menu(
                         pending.get("chosen") or {}, opts=merged,
                         site_total=self._site_total(), plan_text=self._default_plan_text()))
@@ -1114,11 +1197,10 @@ class PtSubscriber(_PluginBase):
         opts = dict(pending.get("opts") or {})
         opts["run_now"] = True
         self._pending.pop(key, None)
-        sub = self._remote_create(
+        return self._create_with_preview(
             pending.get("name") or chosen.get("title") or "",
             chosen.get("kind") or pending.get("kind") or "series",
-            chosen.get("tmdb_id"), opts)
-        return self._remote_confirmed(sub, opts)
+            chosen.get("tmdb_id"), opts, key)
 
     @staticmethod
     def _brief_candidates(items: List[dict], name: str, kind: str) -> List[dict]:
@@ -1143,10 +1225,10 @@ class PtSubscriber(_PluginBase):
 
     @staticmethod
     def _has_explicit_opts(opts: Optional[Dict[str, Any]]) -> bool:
-        """用户是否已经明确指定了集数 / 站点 / 刷新计划中的任意一项。"""
+        """用户是否已经明确指定了集数 / 站点 / 分辨率 / 刷新计划中的任意一项。"""
         opts = dict(opts or {})
         return any(opts.get(f) for f in (
-            "ep_start", "ep_end", "season", "site_ids",
+            "ep_start", "ep_end", "season", "site_ids", "resolution",
             "schedule_mode", "schedule_interval", "run_now",
         ))
 
@@ -1160,6 +1242,8 @@ class PtSubscriber(_PluginBase):
                         else f"从第{opts['ep_start']}集起")
         if opts.get("site_ids"):
             bits.append(f"{len(opts['site_ids'])} 个站点")
+        if opts.get("resolution"):
+            bits.append(f"只要{str(opts['resolution']).upper()}")
         if opts.get("schedule_mode"):
             bits.append("立即执行" if opts.get("run_now") else "自定义时间")
         elif opts.get("run_now"):
@@ -1174,7 +1258,7 @@ class PtSubscriber(_PluginBase):
             return remote_ui.render_help()
         if text in ("订阅", "订阅它", "订阅这个", "就这个", "sub"):
             return self.remote_dl_subscribe(key=key)
-        intent = remote_ui.parse_intent(text)
+        intent = remote_ui.parse_intent(text, site_names=self._site_labels())
         if intent.get("list_sites") and not intent.get("name"):
             return self._remote_sites_text()
         if intent.get("pick") is not None and not intent.get("name"):
@@ -1182,7 +1266,7 @@ class PtSubscriber(_PluginBase):
         name = intent.get("name") or ""
         if not name:
             return ("用法：/ptfind 片名 —— 只找资源直接下载，不建订阅。\n"
-                    "可加：/ptfind 天下第一 5-8集 站点馒头")
+                    "可加：/ptfind 天下第一 [5-8集] [站点馒头]")
         return self.remote_dl_start(name, intent, key=key)
 
     def remote_dl_start(self, name: str, intent: Optional[Dict[str, Any]] = None,
@@ -1194,27 +1278,31 @@ class PtSubscriber(_PluginBase):
             return msg
         domains = extra.get("site_ids") or self._default_sites()
         if not domains:
-            return ("MP 里没有可搜索的站点。请先在 MoviePilot 站点页启用，"
-                    "并完成用户认证（否则搜索会返回 0 条）。")
+            return ("MP 里还没有启用任何站点：去 MoviePilot 站点页添加并启用站点，"
+                    "然后重试。")
         keyword = search_keyword({"name": name})
         try:
             result = self.bridge.search(domains, keyword, self._max_results)
         except Exception as exc:  # noqa: BLE001
             return f"搜索失败：{type(exc).__name__}: {str(exc)[:140]}"
 
-        # 只按集数过滤，不套订阅规则：用户说的是「直接找资源下」，别把结果筛没了
+        # 只按集数过滤，不套订阅规则：用户说的是「直接找资源下」，别把结果筛没了。
+        # 但用户带了「1080P」这类分辨率时要按它筛。
         pseudo = {
             "include_words": "", "exclude_words": "",
             "ep_start": intent.get("ep_start"), "ep_end": intent.get("ep_end"),
             "season": intent.get("season"),
             "kind": "movie" if intent.get("kind") == "movie" else "series",
         }
+        rules_override = ({"resolutions": [str(intent["resolution"])]}
+                          if intent.get("resolution") else {})
         passed, _ = filter_candidates(pseudo, result.get("items") or [], set(),
-                                      rules_override={})
+                                      rules_override=rules_override)
         passed.sort(key=lambda x: (-(x.get("seeders") or 0), x.get("size_gb") or 0))
         if not passed:
             return (f"「{name}」没搜到可用资源。\n"
-                    "换个片名写法，或去掉集数限制，或去插件页确认站点可搜索。")
+                    "换个片名写法，或去掉集数限制，或去插件页确认站点可搜索。"
+                    f"{self._search_fail_reason(result)}")
 
         rows = passed[: remote_ui.MAX_RESOURCES]
         self._pending_dl[key] = {"name": name, "token": result.get("token") or "",
@@ -1245,9 +1333,11 @@ class PtSubscriber(_PluginBase):
             return f"提交下载器失败：{type(exc).__name__}: {str(exc)[:140]}"
         ok_keys = {r.get("key") for r in (result.get("results") or []) if r.get("ok")}
         done = [c for c in chosen if (c.get("key") or "") in ok_keys]
+        sub_id = str(pending.get("sub_id") or "")
         for c in done:
             self.store.add_hit({
-                "sub_id": "", "sub": "远程直下", "dedup_key": c.get("key") or "",
+                "sub_id": sub_id, "sub": "远程直下" if not sub_id else "订阅先手",
+                "dedup_key": c.get("key") or "",
                 "title": c.get("display_title") or c.get("title") or "",
                 "site": c.get("site") or "", "domain": c.get("domain") or "",
                 "resolution": resolution_of(c.get("attrs")),
@@ -1263,8 +1353,11 @@ class PtSubscriber(_PluginBase):
             lines.append("· " + str(c.get("display_title") or c.get("title") or "")[:56])
         if len(chosen) > len(done):
             lines.append(f"（{len(chosen) - len(done)} 条被下载器拒绝）")
-        lines.append("进度在 MP 的下载页看；想改成追更就发「/ptsub %s」。"
-                     % (pending.get("name") or ""))
+        if sub_id:
+            lines.append("订阅照旧挂着，按计划自动追更。")
+        else:
+            lines.append("进度在 MP 的下载页看；想改成追更就发「/ptsub %s」。"
+                         % (pending.get("name") or ""))
         return "\n".join(lines)
 
     def remote_dl_subscribe(self, key: str = "") -> str:
@@ -1306,6 +1399,9 @@ class PtSubscriber(_PluginBase):
             value = opts.get(field)
             if value:
                 payload[field] = value
+        # 远程带的分辨率写进订阅规则，补搜时按规则过滤（只挑这个清晰度）
+        if opts.get("resolution"):
+            payload["rules"] = {"resolutions": [str(opts["resolution"])]}
         sub = self.store.upsert_sub(payload)
         if tmdb_id:
             sub = self._fill_meta(sub, int(tmdb_id)) or sub
@@ -1331,6 +1427,69 @@ class PtSubscriber(_PluginBase):
             text += "\n" + self._run_sub_bg(str(sub.get("id") or ""))
         return text
 
+    def _create_with_preview(self, name: str, kind: str, tmdb_id: Optional[int],
+                             opts: Optional[Dict[str, Any]] = None,
+                             key: str = "") -> str:
+        """建订阅 + 顺手先搜一轮，把能下的资源摆出来给用户挑（回序号才下）。
+
+        用户的原话是「提前把需要的查找完给我资源选择，我再告诉它要哪个」，
+        所以这里不等计划到点：订阅先落库（不丢），紧接着同步搜一轮，
+        把结果按做种数排好列出来；回序号就下那条，回「不用」就只挂着订阅。
+        """
+        opts = dict(opts or {})
+        run_now = bool(opts.pop("run_now", False))
+        sub = self._remote_create(name, kind, tmdb_id, opts)
+        text = self._remote_confirmed(sub, opts)
+        preview, found = self._preview_resources(sub, opts, key)
+        if found:
+            # 已经把资源摆出来了：别再让后台重复搜一轮
+            return text + "\n\n" + preview
+        if run_now:
+            text += "\n" + self._run_sub_bg(str(sub.get("id") or ""))
+        return text + ("\n\n" + preview if preview else "")
+
+    def _preview_resources(self, sub: dict, opts: Optional[Dict[str, Any]] = None,
+                           key: str = "") -> Tuple[str, bool]:
+        """建完订阅先搜一轮；返回 (文案, 是否搜到资源)。搜到则把待选资源挂到 key 上。"""
+        opts = dict(opts or {})
+        if not key:
+            return "", False
+        domains = list(opts.get("site_ids") or sub.get("site_ids")
+                       or self._default_sites() or [])
+        name = str(sub.get("name") or "")
+        if not domains or not name:
+            return "", False
+        try:
+            result = self.bridge.search(domains, search_keyword(sub), self._max_results)
+        except Exception as exc:  # noqa: BLE001 - 搜不到不影响订阅本身
+            return (f"顺手先搜一轮没成：{type(exc).__name__}: {str(exc)[:80]}（不影响订阅）",
+                    False)
+        pseudo = {
+            "include_words": "", "exclude_words": "",
+            "ep_start": sub.get("ep_start"), "ep_end": sub.get("ep_end"),
+            "season": sub.get("season"),
+            "kind": "movie" if str(sub.get("kind")) == "movie" else "series",
+        }
+        rules = sub.get("rules") or {}
+        rules_override = ({"resolutions": rules.get("resolutions")}
+                          if rules.get("resolutions") else {})
+        passed, _ = filter_candidates(pseudo, result.get("items") or [], set(),
+                                      rules_override=rules_override)
+        passed.sort(key=lambda x: (-(x.get("seeders") or 0), x.get("size_gb") or 0))
+        if not passed:
+            tail = self._search_fail_reason(result)
+            return ("顺手先搜了一轮：现在还没搜到能下的资源，到计划时间会自动再搜。" + tail,
+                    False)
+        rows = passed[: remote_ui.MAX_RESOURCES]
+        self._pending_dl[key] = {
+            "name": name, "token": result.get("token") or "", "rows": rows,
+            "sub_id": str(sub.get("id") or ""), "ep_start": sub.get("ep_start"),
+            "mode": "preview", "at": self._now_ts(),
+        }
+        text = remote_ui.render_resources(name, rows)
+        text += "\n回序号就下这条（可回 1-3 多条）；回「不用」就只挂着订阅，等计划时间自动搜。"
+        return text, True
+
     def _run_sub_bg(self, sid: str) -> str:
         """立即执行放后台，先回执再搜，QQ 里不用干等一两分钟。"""
         if not sid:
@@ -1351,9 +1510,12 @@ class PtSubscriber(_PluginBase):
         return "已在后台立即搜一轮，结果会按订阅通知再发你。"
 
     def _resolve_sites(self, words: List[str]) -> Tuple[List[str], List[str], List[str]]:
-        """站点口语名 → MP 站点域名。返回 (命中的域名, 没认出来的词, 存在但不可搜的站名)。
+        """站点口语名 → MP 站点域名。返回 (命中的域名, 没认出来的词, 存在但被停用的站名)。
 
         用户只会说「馒头」「岛」，不会记域名，所以按 名字包含 / 域名包含 双向模糊匹配。
+        能不能搜完全交给 MP（搜索时按官方链执行，内部再换成站点 id），这里只把
+        「被手动停用」当不可用——绝不用索引器清单做否定判断，否则 MP 的系统级用户认证
+        临时掉线时会把所有站点误判成「认证没做好」，而用户侧的站点认证一直是好的。
         """
         words = [str(w).strip() for w in (words or []) if str(w).strip()]
         if not words:
@@ -1362,10 +1524,6 @@ class PtSubscriber(_PluginBase):
             sites = self.bridge.list_sites()
         except Exception:
             sites = []
-        try:
-            searchable = self.bridge.searchable_domains()
-        except Exception:
-            searchable = set()
         picked: List[str] = []
         unknown: List[str] = []
         blocked: List[str] = []
@@ -1385,12 +1543,15 @@ class PtSubscriber(_PluginBase):
                 unknown.append(word)
                 continue
             domain = str(hit.get("domain") or "")
-            if domain and (not searchable or domain.lower() in searchable):
-                if domain not in picked:
-                    picked.append(domain)
-            else:
-                # 站点存在但索引器没配好（多半没做用户认证），单独说清楚
-                blocked.append(str(hit.get("name") or domain))
+            if not domain:
+                unknown.append(word)
+                continue
+            if not hit.get("is_active", True):
+                # 站点在 MP 里被手动停用了，这才是真的搜不了
+                blocked.append(f"{hit.get('name') or domain}（站点已停用）")
+                continue
+            if domain not in picked:
+                picked.append(domain)
         return picked, unknown, blocked
 
     def _resolve_sites_or_msg(self, words: List[str]) -> Tuple[Dict[str, Any], str]:
@@ -1400,37 +1561,64 @@ class PtSubscriber(_PluginBase):
             return {}, (f"没认出这些站点：{'、'.join(unknown[:4])}\n"
                         f"{self._remote_sites_text(limit=8)}")
         if blocked and not picked:
-            return {}, (f"这些站点现在搜不了（索引器未就绪，去 MP 完成用户认证）："
-                        f"{'、'.join(blocked[:4])}\n{self._remote_sites_text(limit=8)}")
+            return {}, (f"站点「{'、'.join(blocked[:4])}」现在搜不了："
+                        f"{self._remote_sites_text(limit=8)}")
         return {"site_ids": picked, "unknown_sites": unknown + blocked}, ""
 
     def _remote_sites_text(self, limit: int = 9) -> str:
-        """能搜的站点清单 + 用法；用户发「站点」或站点打错时给提示。"""
+        """能用的站点清单 + 用法；用户发「站点」或站点打错时给提示。"""
         try:
             sites = self.bridge.list_sites()
-            searchable = self.bridge.searchable_domains()
         except Exception as exc:  # noqa: BLE001
             return f"读取站点失败：{type(exc).__name__}: {str(exc)[:100]}"
-        usable = [s for s in sites
-                  if s.get("is_active")
-                  and (not searchable or str(s.get("domain")).lower() in searchable)]
-        if not usable:
-            return ("MP 里没有可搜索站点。请到 MoviePilot 站点页启用站点，"
-                    "并确认已完成用户认证。")
-        names = [str(s.get("name") or s.get("domain")) for s in usable[:limit]]
-        more = f" 等 {len(usable)} 个" if len(usable) > limit else ""
-        return (f"可搜索站点 {len(usable)} 个：{'、'.join(names)}{more}\n"
-                f"用法：/ptsub 片名 站点 馒头")
+        # 只把「停用」当不可用；索引器清单读不到时不再据此判定（会大面积误伤）
+        active = [s for s in sites if s.get("is_active", True)]
+        if not active:
+            return "MP 里还没有启用任何站点：去 MoviePilot 站点页添加并启用站点。"
+        names = [str(s.get("name") or s.get("domain")) for s in active[:limit]]
+        more = f" 等 {len(active)} 个" if len(active) > limit else ""
+        return f"可用站点 {len(active)} 个：{'、'.join(names)}{more}。\n用法：站点 馒头"
 
     def _default_sites(self) -> List[str]:
-        """远程建订阅的默认站点：所有已启用且可搜索的站点，之后可在插件页收窄。"""
+        """远程建订阅的默认站点：所有已启用的站点（存域名，搜索时再换成站点 id）。"""
         try:
             sites = self.bridge.list_sites()
-            searchable = self.bridge.searchable_domains()
         except Exception:
             return []
-        return [s["domain"] for s in sites
-                if s.get("is_active") and (not searchable or str(s["domain"]).lower() in searchable)]
+        return [str(s["domain"]) for s in sites if s.get("is_active", True)]
+
+    def _site_labels(self) -> List[str]:
+        """站点口语名 + 域名清单，供 parse_intent 识别「观众」「馒头」这类裸站名。"""
+        try:
+            sites = self.bridge.list_sites()
+        except Exception:
+            return []
+        labels: List[str] = []
+        for s in sites:
+            for k in ("name", "domain"):
+                v = str(s.get(k) or "").strip()
+                if v:
+                    labels.append(v)
+        return labels
+
+    def _search_fail_reason(self, result: Optional[Dict[str, Any]] = None) -> str:
+        """搜不到时给出准确原因（追加到提示末尾）。
+
+        优先识别 MP 的系统级「用户认证」门槛：认证不过时所有站点都被禁用、索引器为空，
+        但用户侧的站点认证可能是好的——这正是「认证好了却搜不了」的错位来源。
+        返回空串表示没有额外原因可提示。
+        """
+        level = self.bridge.auth_level()
+        if 0 <= level < 2:
+            return ("\n\nMP 的「用户认证」没过（这是 MP 自己每约 10 分钟跑一次的账号自检，"
+                    "不是你的站点登录失效，cookie/密钥不用重填）。\n"
+                    "自检失败期间 MP 会关掉「搜索链」，所以聊天里怎么搜都是 0 条，"
+                    "而站点页面直接浏览还能用。等下次自检通过（10 分钟内）自动恢复。")
+        errors = (result or {}).get("errors") or []
+        if errors:
+            sample = errors[0].get("message") or ""
+            return f"\n\n搜索时部分站点报错：{sample[:120]}"
+        return ""
 
     @staticmethod
     def _kind_label(kind: str) -> str:

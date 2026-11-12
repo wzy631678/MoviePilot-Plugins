@@ -74,6 +74,10 @@ class PtSubSubscribeInput(BaseModel):
         default=None,
         description="限定站点的名字或域名，多个用逗号分隔，如「馒头,岛」；不传用全部可搜索站点。",
     )
+    resolution: Optional[str] = Field(
+        default=None,
+        description="限定清晰度：1080P / 720P / 4K / 蓝光；用户说「要1080P」就传 1080P。",
+    )
     time: Optional[str] = Field(
         default=None,
         description="每天几点去搜，HH:MM，如 03:00；用户说「每天凌晨3点」就传 03:00。",
@@ -112,6 +116,10 @@ class PtSubFindInput(BaseModel):
         default=None,
         description="限定站点名字或域名，多个用逗号分隔；不传搜全部可搜索站点。",
     )
+    resolution: Optional[str] = Field(
+        default=None,
+        description="限定清晰度：1080P / 720P / 4K / 蓝光；用户说「要1080P」就传 1080P。",
+    )
 
 
 # 插件实例的模块级引用，由 PtSubscriber.init_plugin() 注入，作为兜底寻址。
@@ -143,6 +151,7 @@ def _opts(
     ep_start: Optional[int] = None,
     ep_end: Optional[int] = None,
     sites: Optional[str] = None,
+    resolution: Optional[str] = None,
     time: Optional[str] = None,
     interval: Optional[int] = None,
     run_now: Optional[bool] = None,
@@ -154,6 +163,8 @@ def _opts(
         opts["ep_start"] = int(ep_start)
     if ep_end:
         opts["ep_end"] = int(ep_end)
+    if resolution:
+        opts["resolution"] = str(resolution).strip().lower()
     if time:
         opts["schedule_time"] = str(time).strip()
         opts["schedule_mode"] = "daily"
@@ -176,8 +187,8 @@ class PtSubSubscribeTool(MoviePilotTool):
         "按已播集数补搜追更），与 MoviePilot 自带订阅完全无关。"
         "第一次调用只传 name 查询同名作品；若返回候选列表，把列表原样给用户看，"
         "等用户回复序号后再调用本工具并传 pick（如 2）。"
-        "用户提到「从第几集开始」「只搜某几个站」「每天几点」「现在就搜」时，"
-        "分别传 ep_start / sites / time / run_now。"
+        "用户提到「从第几集开始」「只搜某几个站」「要1080P」「每天几点」「现在就搜」时，"
+        "分别传 ep_start / sites / resolution / time / run_now。"
     )
     tags: list[str] = Field(
         default_factory=lambda: _tool_tags(
