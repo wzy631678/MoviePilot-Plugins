@@ -607,6 +607,18 @@ _UI_RES = {"4k": "4K", "1080p": "1080p", "720p": "720p", "480p": "480p"}
 _UI_CODEC = {"h264": "x264", "h265": "x265", "av1": "AV1", "vc1": "VC-1", "xvid": "XviD"}
 _UI_SOURCE = {"webdl": "WEB-DL", "bluray": "BluRay", "remux": "REMUX",
               "hdtv": "HDTV", "dvd": "DVD", "tc": "枪版"}
+# 官组/官方发布词（与 rules.GROUP_RE 一致），用于判定「官种免费」
+_GROUP_UI_RE = re.compile(r"官组|官方|原组|\bgz\b|\bwiki\b|\bcmct\b|\bfrds\b", re.I)
+
+
+def _is_official(r: dict) -> bool:
+    """是否官方发布（官种）：badges 带「官组」，或标题/描述带官组词。"""
+    badges = [str(b) for b in (r.get("badges") or [])]
+    badges += [str(b) for b in ((r.get("attrs") or {}).get("badges") or [])]
+    if "官组" in badges:
+        return True
+    hay = f"{r.get('title') or ''} {r.get('description') or ''}"
+    return bool(_GROUP_UI_RE.search(hay))
 
 
 def _attrs_spec(r: dict) -> str:
@@ -632,9 +644,10 @@ def _attrs_spec(r: dict) -> str:
 def _res_meta(r: dict, show_site: bool = True) -> str:
     """一行的副信息：站点 · 做种 · 下载 · 清晰度/编码 · 体积 · 标记。
 
-    用户最关心的三个数（站点、做种、下载人数）放在最前面，扫一眼就能判断
-    「这条快不快、要不要下」；清晰度/编码（x264/x265/WEB-DL）、体积、免费
-    标记跟在后面，不抢眼。
+    站点名由调用方决定放哪（默认放参数行首，见 ``render_resources`` 里把站点
+    提到标题行时传 ``show_site=False``）；做种、下载人数放最前，扫一眼就能判断
+    「这条快不快、要不要下」；清晰度/编码（x264/x265/WEB-DL）、体积、免费标记
+    跟在后面，不抢眼。
     """
     bits: list[str] = []
     if show_site and (r.get("site") or r.get("domain")):
@@ -666,7 +679,10 @@ def _res_meta(r: dict, show_site: bool = True) -> str:
     if ep:
         bits.append(f"第{ep}集")
     if r.get("free") or "FREE" in (r.get("badges") or []):
-        bits.append("免费")
+        # 官种免费用下划线字符包住「官种免费」：QQ 里真正的 markdown 下划线
+        # （__x__）会被 QQBot._escape_markdown 转义成字面双下划线，所以这里用
+        # 全角下划线字符（＿），QQ 原样渲染、一定显示，比普通「免费」醒目。
+        bits.append("＿官种免费＿" if _is_official(r) else "免费")
     else:
         for badge in (r.get("badges") or []):
             b = str(badge)
@@ -713,11 +729,16 @@ def render_resources(
     for idx in range(first, last + 1):
         r = all_rows[idx - 1]
         title = str(r.get("display_title") or r.get("title") or "").strip()
-        meta = _res_meta(r, show_site=show_site)
+        site = str(r.get("site") or r.get("domain") or "").strip()
+        # 标题行 = 「【序号】完整标题 + 站点名」：站点从参数行提到标题行，
+        # 资源名和站点在同一行里对照，一眼看出「这条是哪个站的」；
+        # 参数行只留做种/下载/规格/体积/免费标记（show_site=False）。
+        meta = _res_meta(r, show_site=False if (show_site and site) else show_site)
+        t = _fit_title(title)
+        if show_site and site:
+            t = f"{t} {site}"
         # 标题独占一行（长标题让渠道自己折行，不再砍成 20 字），参数另起一行。
-        # 这样一屏里每条都是「标题 → 参数」两行一组，既不挤，也不会因为
-        # 标题被截断而几条看起来一模一样。
-        lines.append(f"【{idx}】{_fit_title(title)}")
+        lines.append(f"【{idx}】{t}")
         if meta:
             lines.append(meta)
     if total > size:

@@ -359,6 +359,17 @@ class MPBridge:
                                "message": f"{type(exc2).__name__}: {exc2}"[:160]})
                 contexts = []
 
+        # 站点 ID → MP 站点表配置名：用户要求站点名与 MP 里添加的名字完全对齐，
+        # 直接调取站点表 name（info.site_name 可能返回站点内部名或为空）。
+        mp_site_names: dict[int, str] = {}
+        try:
+            mp_site_names = {
+                int(s.get("sid")): str(s.get("name") or "")
+                for s in self.list_sites() if s.get("sid")
+            }
+        except Exception as exc:  # noqa: BLE001 - 站点表不可用时回退站点结果自带名
+            self._log("debug", f"读取 MP 站点名失败，回退站点结果自带名：{type(exc).__name__}: {exc}")
+
         for ctx in contexts:
             info = getattr(ctx, "torrent_info", None)
             if info is None and isinstance(ctx, dict):
@@ -366,8 +377,16 @@ class MPBridge:
             if info is None:
                 continue
             raw = _torrent_to_raw(info)
-            site_name = str(getattr(info, "site_name", "") or "")
-            # 站点名来自 MP 结果本身（权威）；domain 只用作去重 key
+            site_name = ""
+            site_id = getattr(info, "site", None)
+            if site_id is not None:
+                try:
+                    site_name = mp_site_names.get(int(site_id), "")
+                except (TypeError, ValueError):
+                    site_name = ""
+            if not site_name:
+                site_name = str(getattr(info, "site_name", "") or "")
+            # 站点名来自 MP 站点表（权威），与 MP 添加的名字对齐；domain 只用作去重 key
             card = enrich_item(site_name or "", site_name, raw)
             key = card["key"]
             if key in raw_by_key:
