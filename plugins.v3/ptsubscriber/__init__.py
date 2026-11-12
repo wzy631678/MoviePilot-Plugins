@@ -169,7 +169,7 @@ def _name_tier(core: str, title: str) -> int:
 class PtSubscriber(_PluginBase):
     plugin_name = "定时订阅下载"
     plugin_desc = "自己选周几几点，到指定站点搜资源并按详细规则下载到指定容器；自动对接 TMDB，按片名、年份、剧集/电影、集数逐项比对，只把真正这部排在最前。聊天入口不用打斜杠，一条说全最省事：「订阅 天下第一 观众 1080P 周一5:30」（片名/站点/清晰度/周期顺序随意）；也可以只发「订阅 天才女友」先列同名作品，回序号后再选「从第几集 / 哪些站 / 多久刷一次」，回「确定」立刻补搜并把能下的资源列出来让你挑；「查资源 仙逆 馒头 1080P」只搜一轮直接下，不建订阅。斜杠命令 /ptsub、/ptfind、/ptlist 一样可用；回复全是纯文本不带图。"
-    plugin_version = "1.9.1"
+    plugin_version = "1.9.2"
     plugin_author = "wzy"
     plugin_config_prefix = "ptsubscriber_"
     plugin_order = 90
@@ -938,22 +938,31 @@ class PtSubscriber(_PluginBase):
         """
         if not text:
             return
+        # 首行当标题、其余当正文。
+        # 关键：qqmsg 渠道的 send 会拼 `caption = f"*{title}*\n{text}"`。markdown 的
+        # `*...*` 强调块一旦跨行，块内所有 `\n` 都会被折叠成空格——整份资源列表就
+        # 挤成一大段（用户实测）。把正文挪到 text 字段后，正文落在 `*` 外面，
+        # `\n` 才按行渲染；标题也正好只占一行，不再重复正文。
+        head, _, body = text.partition("\n")
+        head = head.strip()
+        body = body.strip("\n")
+        # 行尾两个空格 = markdown 硬换行：即便渠道把普通 `\n` 折叠成空格，
+        # 硬换行仍会断行；单行消息不受影响（body 为空时不加）。
+        if body:
+            body = body.replace("\n", "  \n")
         try:
             from app.schemas.message import Message as _Message
 
-            # 只传 title、不传 text：与 MP 原生交互回复完全一致。
-            # 关键：qqmsg 等渠道的 send 会按 `title + "\\n" + text` 拼正文，
-            # 若同时传两者会把同一份内容重复渲染一遍（用户实测见站点报错重复）。
             self.chain.post_message(_Message(
                 channel=channel, source=source, userid=user, username=username,
-                title=text, save_history=False,
+                title=head, text=body or None, save_history=False,
             ))
             return
         except Exception as exc:  # noqa: BLE001 - 消息模型不可用时退回通知链路
             logger.debug(f"[{self.plugin_name}] 直发回复不可用，退回通知链路：{type(exc).__name__}: {exc}")
         try:
             self.post_message(channel=channel, source=source, userid=user,
-                              username=username, title=text, text=text)
+                              username=username, title=head, text=body)
         except Exception as exc:  # noqa: BLE001 - 回执失败不影响订阅
             logger.warning(f"[{self.plugin_name}] 远程回复发送失败：{type(exc).__name__}: {exc}")
 

@@ -576,7 +576,7 @@ def render_candidates(
         if str(c.get("kind")) != "movie" and eps:
             bits.append(f"{eps}集")
         title = c.get("title") or c.get("meta_title") or ""
-        lines.append(f"{i}. {title}（{' · '.join(bits)}）")
+        lines.append(f"[{i}] {title}（{' · '.join(bits)}）")
     if with_hint:
         lines.append("回序号选（如 1，或整条 [1] [从5集] [站点馒头] [每天3:00]）")
     return "\n".join(lines)
@@ -654,24 +654,23 @@ def render_resources(
     first = offset + 1
     last = offset + len(items)
     if total > size:
-        head = (f"「{query}」共 {total} 条资源，按做种从多到少"
-                f"（第 {first}-{last} 条）：")
+        head = f"「{query}」共 {total} 条 · 第 {first}-{last} 条（做种降序）"
     else:
-        head = f"「{query}」找到 {total} 条资源，按做种从多到少："
+        head = f"「{query}」共 {total} 条（做种降序）"
     lines = [head]
     for idx in range(first, last + 1):
         r = all_rows[idx - 1]
         title = str(r.get("display_title") or r.get("title") or "").strip()
         meta = _res_meta(r, show_site=show_site)
-        row = f"{idx}. {_short(title, 20)}"
+        row = f"[{idx}] {_short(title, 20)}"
         if meta:
-            row += f"  ·  {meta}"
+            row += f" · {meta}"
         lines.append(row)
     if total > size:
         if last < total:
-            lines.append(f"（共 {total} 条，还有 {total - last} 条 · 回「下一页」看第 {last + 1}-{min(total, last + size)} 条）")
+            lines.append(f"共 {total} 条，还有 {total - last} 条 · 回「下一页」看第 {last + 1}-{min(total, last + size)} 条")
         else:
-            lines.append(f"（共 {total} 条 · 已是最后一页，回「上一页」往回翻）")
+            lines.append(f"共 {total} 条 · 已是最后一页，回「上一页」往回翻")
     return "\n".join(lines)
 
 
