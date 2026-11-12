@@ -553,6 +553,27 @@ def _short(text: str, limit: int = 70) -> str:
     return s if len(s) <= limit else s[: limit - 1].rstrip("，,。.、 ") + "…"
 
 
+def _fit_title(text: str, head: int = 48, tail: int = 26) -> str:
+    """资源标题：短的原样给，长的掐中间、留头留尾，保证「看得全、分得清」。
+
+    掐中间而不是掐尾，是因为 PT 标题的结构基本是「片名 / 别名 / 季集 / 清晰度 /
+    字幕 / 版本」，真正用来区分同一部戏不同资源的信息（第几集、1080p、国语中字、
+    修复版）全在末尾；只留开头会让一屏好几条长得一模一样，用户没法挑。
+
+    同时把半角 `[]` `()` 换成全角：QQ 机器人的 Markdown 会把 `\\[` `\\]` 当块级
+    公式定界符（`\\(` `\\)` 是行内公式），半角方括号出现在正文里会被渲染成一条
+    居中公式——之前的序号 `[1]` 变成单独一行「1」就是这个原因。
+    """
+    s = re.sub(r"\s+", " ", str(text or "")).strip()
+    s = (s.replace("[", "【").replace("]", "】")
+          .replace("(", "（").replace(")", "）"))
+    if len(s) <= head + tail + 3:
+        return s
+    left = s[:head].rstrip(" ，,。.、/·|")
+    right = s[-tail:].lstrip(" ，,。.、/·|")
+    return f"{left}…{right}"
+
+
 def render_candidates(
     query: str,
     cands: Iterable[dict],
@@ -576,9 +597,9 @@ def render_candidates(
         if str(c.get("kind")) != "movie" and eps:
             bits.append(f"{eps}集")
         title = c.get("title") or c.get("meta_title") or ""
-        lines.append(f"[{i}] {title}（{' · '.join(bits)}）")
+        lines.append(f"【{i}】{title}（{' · '.join(bits)}）")
     if with_hint:
-        lines.append("回序号选（如 1，或整条 [1] [从5集] [站点馒头] [每天3:00]）")
+        lines.append("回序号选（如 1；也能一条说全：从5集 / 站点馒头 / 每天3:00）")
     return "\n".join(lines)
 
 
@@ -597,9 +618,8 @@ def _res_meta(r: dict, show_site: bool = True) -> str:
     peers = r.get("peers")
     if peers is not None:
         bits.append(f"下载 {peers}")
-    grabs = r.get("grabs")
-    if grabs:
-        bits.append(f"完成 {grabs}")
+    # 「完成 xxx」不再显示：它对「下不下得动」没有参考价值，却要占十来个字，
+    # 留着会把参数行挤成两行。做种/下载两个数已经够判断资源热不热。
     res = str(r.get("resolution") or "")
     if res:
         bits.append(res.upper() if res.lower() in ("4k", "1080p", "720p", "480p") else res)
@@ -636,7 +656,7 @@ def render_resources(
     limit: int | None = None,
     show_site: bool = True,
 ) -> str:
-    """列资源：每条一行（序号. 资源名 · 站点 · 做种 · 下载 …），分页展示。
+    """列资源：每条两行（「【序号】完整标题」+「站点 · 做种 · 下载 …」），分页展示。
 
     行数上限只是「一屏显示多少条」，不是搜到多少条；超出部分用「下一页」翻。
     排序由上层 `_rank_rows` 决定（名称精准命中优先，再按做种从多到少）。
@@ -662,10 +682,12 @@ def render_resources(
         r = all_rows[idx - 1]
         title = str(r.get("display_title") or r.get("title") or "").strip()
         meta = _res_meta(r, show_site=show_site)
-        row = f"[{idx}] {_short(title, 20)}"
+        # 标题独占一行（长标题让渠道自己折行，不再砍成 20 字），参数另起一行。
+        # 这样一屏里每条都是「标题 → 参数」两行一组，既不挤，也不会因为
+        # 标题被截断而几条看起来一模一样。
+        lines.append(f"【{idx}】{_fit_title(title)}")
         if meta:
-            row += f" · {meta}"
-        lines.append(row)
+            lines.append(meta)
     if total > size:
         if last < total:
             lines.append(f"共 {total} 条，还有 {total - last} 条 · 回「下一页」看第 {last + 1}-{min(total, last + size)} 条")
