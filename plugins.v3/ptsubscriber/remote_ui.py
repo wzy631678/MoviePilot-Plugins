@@ -583,27 +583,14 @@ def render_candidates(
 
 
 def _res_meta(r: dict, show_site: bool = True) -> str:
-    """一行的副信息：站点 · 清晰度 · 集数 · 体积 · 做种 · 下载 · 免费。
+    """一行的副信息：站点 · 做种 · 下载 · 清晰度 · 体积 · 标记。
 
-    顺序对齐 MP 自己的搜索结果（站点在最前、种子数据居中、标记在后），
-    这样在聊天里扫一眼就能判断「快不快、要不要下」。
+    用户最关心的三个数（站点、做种、下载人数）放在最前面，扫一眼就能判断
+    「这条快不快、要不要下」；清晰度/体积/免费标记跟在后面，不抢眼。
     """
     bits: list[str] = []
     if show_site and (r.get("site") or r.get("domain")):
         bits.append(str(r.get("site") or r.get("domain")))
-    res = str(r.get("resolution") or "")
-    if res:
-        bits.append(res.upper() if res.lower() in ("4k", "1080p", "720p", "480p") else res)
-    ep = r.get("episode")
-    if ep:
-        bits.append(f"第{ep}集")
-    size = r.get("size_gb")
-    if size:
-        try:
-            v = float(size)
-            bits.append(f"{v / 1024:.1f}T" if v >= 1024 else f"{v:.1f}G")
-        except (TypeError, ValueError):
-            pass
     seed = r.get("seeders")
     if seed is not None:
         bits.append(f"做种 {seed}")
@@ -613,6 +600,19 @@ def _res_meta(r: dict, show_site: bool = True) -> str:
     grabs = r.get("grabs")
     if grabs:
         bits.append(f"完成 {grabs}")
+    res = str(r.get("resolution") or "")
+    if res:
+        bits.append(res.upper() if res.lower() in ("4k", "1080p", "720p", "480p") else res)
+    size = r.get("size_gb")
+    if size:
+        try:
+            v = float(size)
+            bits.append(f"{v / 1024:.1f}T" if v >= 1024 else f"{v:.1f}G")
+        except (TypeError, ValueError):
+            pass
+    ep = r.get("episode")
+    if ep:
+        bits.append(f"第{ep}集")
     if r.get("free") or "FREE" in (r.get("badges") or []):
         bits.append("免费")
     else:
@@ -636,9 +636,10 @@ def render_resources(
     limit: int | None = None,
     show_site: bool = True,
 ) -> str:
-    """列资源：每条两行（资源名 / 站点·清晰度·体积·做种·下载），分页展示。
+    """列资源：每条一行（序号. 资源名 · 站点 · 做种 · 下载 …），分页展示。
 
     行数上限只是「一屏显示多少条」，不是搜到多少条；超出部分用「下一页」翻。
+    排序由上层 `_rank_rows` 决定（名称精准命中优先，再按做种从多到少）。
     """
     all_rows = list(rows)
     total = len(all_rows) if total is None else int(total)
@@ -661,10 +662,11 @@ def render_resources(
     for idx in range(first, last + 1):
         r = all_rows[idx - 1]
         title = str(r.get("display_title") or r.get("title") or "").strip()
-        lines.append(f"{idx}. {_short(title, 70)}")
         meta = _res_meta(r, show_site=show_site)
+        row = f"{idx}. {_short(title, 20)}"
         if meta:
-            lines.append(f"    {meta}")
+            row += f"  ·  {meta}"
+        lines.append(row)
     if total > size:
         if last < total:
             lines.append(f"（共 {total} 条，还有 {total - last} 条 · 回「下一页」看第 {last + 1}-{min(total, last + size)} 条）")

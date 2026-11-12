@@ -93,10 +93,83 @@ def build_trigger(sub: dict, tz: str):
     return CronTrigger(hour=hour, minute=minute, timezone=tz)
 
 
+# ---- 资源名精准匹配（排序用） ------------------------------------------------
+# 搜「天下第一」时 PT 站会混进《天下第一剑》《天下第一楼》《安居·又名天下第一难》
+# 这类同名前缀/同名的杂项。下面先把「片名」归一化，再按命中精度分层排序。
+_EP_WORDS_RE = re.compile(
+    r"(?:全|第|共)?\d{1,4}\s*(?:集|话|期|季)|S\d{1,2}\s*E?\d{1,3}"
+    r"|\bEP?\s*\d{1,3}\b|全集|全季|全\d+集|第\d+季|第\d+季?集|第\d+集",
+    re.I)
+_YEAR_RE = re.compile(r"[（(]\s*(?:19|20)\d{2}\s*[）)]|\b(?:19|20)\d{2}\s*版?\b")
+_PURE_PATTERN = (
+    r"(?:\d{3,4}p|2160p|bluray|blu-ray|bdrip|webdl|webrip|x26[45]|h\.?26[45]"
+    r"|hevc|avc|1080|720|480|4k|2k|hdr|sdr|remux|bd|web|\d+bit"
+    r"|简繁|简中|繁中|国语|粤语|双语|中字|字幕|修复|重制|高码|完结|高清|蓝光"
+    r"|全集|全季|全\d+集|第?\d{1,3}集|第?\d{1,2}季|S\d{1,2}E?\d{1,3}|EP?\d{1,3}"
+    r"|[0-9]+)")
+_PURE_SUFFIX_RE = re.compile(r"^(?:" + _PURE_PATTERN + r")$", re.I)
+_PURE_HEAD_RE = re.compile(r"^(?:" + _PURE_PATTERN + r")", re.I)
+_FOREIGN_WORDS = re.compile(r"[剑楼传记录史志侠之篇外传前传后传上下部]|又名|别名")
+
+
+def _norm_name(s: str) -> str:
+    """归一化片名：去年份/版本括号、集数季词、非文字符号，统一小写。"""
+    s = str(s or "")
+    s = _YEAR_RE.sub("", s)
+    s = _EP_WORDS_RE.sub("", s)
+    s = re.sub(r"[^\w\u4e00-\u9fff]+", "", s)
+    return s.lower()
+
+
+def _is_pure_suffix(rest: str) -> bool:
+    """去掉片名后剩下的尾巴是否为「纯版本/封装词」——是则视为同一部。
+
+    例如「1080pwebdl」「国语中字1080p」都是同一部的封装/配音/字种，
+    算 tier0；而「剑」「楼」这类是真正的异名，算 tier1。
+    """
+    if not rest:
+        return True
+    if _PURE_SUFFIX_RE.fullmatch(rest):
+        return True
+    if _FOREIGN_WORDS.search(rest):
+        return False
+    # 逐个吞噬「版本词 / 短中文词」，能全部吞掉就是纯封装尾巴
+    while rest:
+        m = _PURE_HEAD_RE.match(rest)
+        if m and m.end() > 0:
+            rest = rest[m.end():]
+            continue
+        m2 = re.match(r"[\u4e00-\u9fff]{1,4}", rest)
+        if m2 and not _FOREIGN_WORDS.search(m2.group(0)):
+            rest = rest[m2.end():]
+            continue
+        return False
+    return True
+
+
+def _name_tier(core: str, title: str) -> int:
+    """命中精度分层：0=完全同名 1=标题含片名 2=片名含标题 3=勉强沾边。"""
+    if not core:
+        return 3
+    t = _norm_name(title)
+    if not t:
+        return 3
+    if core == t:
+        return 0
+    if t.startswith(core) or t.endswith(core):
+        rest = t[len(core):] if t.startswith(core) else t[: len(t) - len(core)]
+        return 0 if _is_pure_suffix(rest) else 1
+    if core in t:
+        return 1
+    if t in core:
+        return 2
+    return 3
+
+
 class PtSubscriber(_PluginBase):
     plugin_name = "定时订阅下载"
     plugin_desc = "自己选周几几点，到指定站点搜资源并按详细规则下载到指定容器；自动对接 TMDB，按片名、年份、剧集/电影、集数逐项比对，只把真正这部排在最前。聊天入口不用打斜杠，一条说全最省事：「订阅 天下第一 观众 1080P 周一5:30」（片名/站点/清晰度/周期顺序随意）；也可以只发「订阅 天才女友」先列同名作品，回序号后再选「从第几集 / 哪些站 / 多久刷一次」，回「确定」立刻补搜并把能下的资源列出来让你挑；「查资源 仙逆 馒头 1080P」只搜一轮直接下，不建订阅。斜杠命令 /ptsub、/ptfind、/ptlist 一样可用；回复全是纯文本不带图。"
-    plugin_version = "1.9.0"
+    plugin_version = "1.9.1"
     plugin_author = "wzy"
     plugin_config_prefix = "ptsubscriber_"
     plugin_order = 90
@@ -1323,17 +1396,21 @@ class PtSubscriber(_PluginBase):
 
     @staticmethod
     def _rank_rows(name: str, rows: list) -> list:
-        """片名对得上的排前面，再按做种从多到少——做种多的先下，速度更快。
+        """名称精准命中优先，组内按做种从多到少。
 
-        PT 站的关键词搜索会给一堆同名前缀的作品（搜「天下第一」会混进
-        《天下第一剑》《天下第一楼》），先把标题里带本名的提上来，翻第一页
-        就能看到真能下的那几条。
+        PT 站关键词搜索会给一堆同名前缀/同名作品（搜「天下第一」会混进
+        《天下第一剑》《天下第一楼》）。这里按「标题剥掉集数/年份/季之后和
+        片名完全一致」→「标题带片名」→「片名带标题」→「勉强沾边」分层，
+        每一层内部都按做种从多到少排——名称对得上的先列，做种多的先下。
         """
-        core = str(search_keyword({"name": name}) or "").replace(" ", "")
+        core = _norm_name(name)
+
         def _key(r: dict):
-            title = str(r.get("display_title") or r.get("title") or "").replace(" ", "")
-            hit = 0 if (len(core) >= 2 and core in title) else 1
-            return (hit, -(r.get("seeders") or 0), r.get("size_gb") or 0)
+            title = str(r.get("display_title") or r.get("title") or "")
+            return (_name_tier(core, title),
+                    -(r.get("seeders") or 0),
+                    r.get("size_gb") or 0)
+
         return sorted(rows, key=_key)
 
     def _dl_rows(self, pending: Dict[str, Any]) -> list:
