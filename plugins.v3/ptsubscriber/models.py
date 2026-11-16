@@ -26,11 +26,14 @@ class SubscriptionIn(BaseModel):
     ep_end: int | None = None
     # 已提交过下载的集数台账：补搜只找「第一个还没下到的集」，避免重复下载
     delivered_eps: list[int] = Field(default_factory=list)
+    # 媒体库当前已入库集数缓存（卡片显示用；删掉的集不在里面，但台账仍保留，不回头重下）
+    library_eps: list[int] = Field(default_factory=list)
     rules: RuleSet = Field(default_factory=RuleSet)
     downloader_id: str = ""
     qb_category: str = ""
     save_path: str = ""
-    schedule_mode: Literal["daily", "weekly", "interval"] = "daily"
+    # recommend = 按 TMDB 推荐时间（recommend_date 那天起每天守候，不手动定星期几几点）
+    schedule_mode: Literal["recommend", "daily", "weekly", "interval"] = "recommend"
     schedule_time: str = "03:00"
     schedule_weekday: Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"] = "mon"
     schedule_interval: int = 120
@@ -99,7 +102,7 @@ class SubscriptionIn(BaseModel):
             raise ValueError("重试总时长需在 0 ~ 10080 分钟之间，0 表示不重试")
         return v
 
-    @field_validator("delivered_eps")
+    @field_validator("delivered_eps", "library_eps")
     @classmethod
     def clean_delivered(cls, v: list[int]) -> list[int]:
         out: list[int] = []
@@ -186,6 +189,26 @@ def next_episode(sub: dict) -> int | None:
     return None
 
 
+def episode_scope(sub: dict) -> dict:
+    """订阅的集数区间：从第几集到第几集、一共几集、已下几集、还差几集。
+
+    分母取「区间集数」而不是整季总集数：订阅《仙逆》165-200 时，
+    卡片该显示「3/36」，不是「5/200」——200 是整季的总集数，跟这次任务无关。
+    """
+    start = int(sub.get("ep_start") or 0) or 1
+    end = int(sub.get("ep_end") or 0) or int(sub.get("total_eps") or 0) or 0
+    span = end - start + 1 if (end and end >= start) else 0
+    done = sorted({int(x) for x in (sub.get("delivered_eps") or [])})
+    in_scope = [ep for ep in done if ep >= start and (not end or ep <= end)]
+    return {
+        "start": start,
+        "end": end,
+        "total": span,
+        "done": len(in_scope),
+        "left": max(0, span - len(in_scope)) if span else 0,
+    }
+
+
 def search_keyword(sub: dict) -> str:
     """站点搜索用的关键词：订阅名称本身。
 
@@ -196,18 +219,16 @@ def search_keyword(sub: dict) -> str:
 
 
 def episode_progress(sub: dict) -> str:
-    """卡片上显示的补搜进度，例如「已下 3 集 · 下一个第 4 集」。"""
+    """卡片上显示的补搜进度，例如「已下 3/36 集 · 下一个第 168 集」。"""
     if (sub.get("kind") or "series") == "movie":
         return "电影 · 下到即止"
-    start = int(sub.get("ep_start") or 1)
-    end = int(sub.get("ep_end") or 0)
-    done = sorted({int(x) for x in (sub.get("delivered_eps") or [])})
-    if not done:
-        return f"第 {start} 集起，一集一集补"
+    sc = episode_scope(sub)
+    if not sc["done"]:
+        return f"第 {sc['start']} 集起，一集一集补"
     nxt = next_episode(sub)
     if nxt is None:
-        return f"已下 {len(done)} 集，区间内已补齐" if end else f"已下 {len(done)} 集"
-    return f"已下 {len(done)} 集 · 下一个第 {nxt} 集"
+        return f"区间已补齐（{sc['done']}/{sc['total']} 集）" if sc["total"] else f"已下 {sc['done']} 集"
+    return f"已下 {sc['done']}/{sc['total']} 集 · 下一个第 {nxt} 集"
 
 
 def parse_episode(title: str) -> int | None:
@@ -278,7 +299,11 @@ def match_title(
 
 
 def schedule_label(sub: dict) -> str:
-    """把执行计划翻译成中文，明确「周几几点去勾选站点找资源」。"""
+    """把执行时间翻译成中文，明确「周几几点去勾选站点找资源」。
+
+    recommend 模式：不固定星期几几点，按 TMDB 推荐更新日（recommend_date）起每天守候，
+    避免错过免费种子；用户也可在「执行时间」里切回自定义每天/每周。
+    """
     mode = sub.get("schedule_mode", "daily")
     time_text = sub.get("schedule_time") or "03:00"
     retry = int(sub.get("retry_interval") or 0)
@@ -286,6 +311,10 @@ def schedule_label(sub: dict) -> str:
     tail = f"；没更新就每 {retry} 分钟再搜，最多守 {window} 分钟" if retry and window else ""
     if mode == "interval":
         return f"每隔 {sub.get('schedule_interval') or 120} 分钟到勾选站点搜一次" + tail
+    if mode == "recommend":
+        rec = str(sub.get("recommend_date") or "")
+        start = f"{rec} 起" if rec else "按 TMDB 推荐时间"
+        return f"{start}，每天 {time_text} 到勾选站点搜资源" + tail
     weekday = sub.get("schedule_weekday") or "mon"
     names = {"mon": "周一", "tue": "周二", "wed": "周三", "thu": "周四",
              "fri": "周五", "sat": "周六", "sun": "周日"}

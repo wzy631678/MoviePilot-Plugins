@@ -13,6 +13,7 @@ from .meta import META_KEYS, poster_url
 from .models import (
     SubscriptionIn,
     episode_progress,
+    episode_scope,
     match_title,
     next_episode,
     schedule_label,
@@ -61,6 +62,10 @@ class Store:
         # 前端不传台账时沿用旧记录，避免编辑一次订阅就把「已下过的集」清空重下
         if old and "delivered_eps" not in payload:
             body["delivered_eps"] = old.get("delivered_eps") or []
+        if old and "library_eps" not in payload:
+            body["library_eps"] = old.get("library_eps") or []
+        if old and "recommend_date" not in payload:
+            body["recommend_date"] = old.get("recommend_date") or ""
         try:
             model = SubscriptionIn(**body)
         except ValidationError as exc:
@@ -157,6 +162,19 @@ class Store:
                 self.save_subs(items)
                 return
 
+    def set_sub_fields(self, sid: str, **fields) -> dict | None:
+        """给一条订阅就地补几个字段（媒体库缓存 / 推荐更新日等）。"""
+        items = self.subs()
+        for item in items:
+            if item.get("id") == sid:
+                for key, value in fields.items():
+                    if value is not None:
+                        item[key] = value
+                item["updated_at"] = _now()
+                self.save_subs(items)
+                return item
+        return None
+
     def hits(self) -> list[dict]:
         return list(self.backend.load("hits", []) or [])
 
@@ -178,12 +196,19 @@ class Store:
         self.backend.save("logs", items[: self.log_limit])
 
     def last_runs(self) -> dict[str, dict]:
-        """每条订阅最近一次运行记录（日志本身已按时间倒序）。"""
+        """每条订阅最近一次运行记录（日志本身已按时间倒序）。
+
+        老版本写的日志只有订阅名、没有 sub_id，这里按名字也留一份索引，
+        免得卡片明明跑过却一直显示「未执行」。
+        """
         out: dict[str, dict] = {}
         for entry in self.logs():
             sid = entry.get("sub_id")
-            if sid and sid not in out:
+            if sid and str(sid) not in out:
                 out[str(sid)] = entry
+            name = str(entry.get("sub") or "").strip()
+            if name and f"name:{name}" not in out:
+                out[f"name:{name}"] = entry
         return out
 
     def public_subs(self) -> list[dict]:
@@ -197,11 +222,32 @@ class Store:
             sub["next_episode"] = next_episode(sub)
             sub["search_keyword"] = search_keyword(sub)
             # 卡片上的「166/200」：已提交集数 / TMDB 总集数（查不到就退回订阅里填的结束集）
-            done = {int(x) for x in (sub.get("delivered_eps") or [])}
+            done = sorted({int(x) for x in (sub.get("delivered_eps") or [])})
             sub["done_eps"] = len(done)
+            # 高位水印：已下到第几集。删掉前面看过的集也不会回头重下——只往下补。
+            sub["high_ep"] = done[-1] if done else 0
+            # 媒体库当前实际有几集入库（TMDB 元数据刷新时缓存，删了就变少，仅作显示）
+            lib = sorted({int(x) for x in (sub.get("library_eps") or [])})
+            if not lib and not sub.get("lib_synced"):
+                # 老订阅还没跟媒体库对齐过：先按「下到过」的集数显示，
+                # 等下一轮补搜/保存后写入真实存量再收缩，避免卡片突然变 0/52
+                lib = done
+            sub["library_eps"] = lib
+            sub["lib_count"] = len(lib)
+            sub["lib_synced"] = bool(sub.get("lib_synced"))
             sub["total_eps"] = int(sub.get("total_eps") or 0) or int(sub.get("ep_end") or 0)
+            # 任务墙上的「3/36」：区间内已下 / 区间总集数（不是整季 200 集）。
+            # 用户订阅 165-200，分母就该是 36，这样卡片和表单里的数字才对得上。
+            sc = episode_scope(sub)
+            sub["scope_start"] = sc["start"]
+            sub["scope_end"] = sc["end"]
+            sub["scope_total"] = sc["total"]
+            sub["scope_done"] = sc["done"]
+            sub["scope_left"] = sc["left"]
             sub["poster_url"] = poster_url(sub.get("poster_path"))
             last = runs.get(str(sub.get("id") or "")) or {}
+            if not last:
+                last = runs.get("name:" + str(sub.get("name") or "").strip()) or {}
             sub["last_run_at"] = last.get("at") or ""
             sub["last_status"] = last.get("status") or ""
             out.append(sub)

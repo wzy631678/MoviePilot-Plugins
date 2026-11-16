@@ -409,6 +409,9 @@ def schedule_text(opts: dict[str, Any] | None) -> str:
     if mode == "weekly":
         day = _WEEK_CN.get(str(opts.get("schedule_weekday") or "mon"), "一")
         return f"每周{day} {opts.get('schedule_time') or '03:00'}"
+    if mode == "recommend":
+        rec = str(opts.get("recommend_date") or "").strip()
+        return f"按推荐时间（{rec} 起）" if rec else "按推荐时间"
     if mode == "daily" and opts.get("schedule_time"):
         return f"每天 {opts['schedule_time']}"
     return ""

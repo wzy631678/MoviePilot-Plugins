@@ -82,6 +82,31 @@ class PluginDataBackend:
         self.plugin.save_data(key=key, value=value)
 
 
+def _recommend_start(sub: dict, tz: str):
+    """recommend 模式的锚点：recommend_date 那天 HH:MM（本地时区）。
+
+    用户没定星期几几点（schedule_mode=recommend）时，按 TMDB 推荐更新时间当天开始
+    每天守候，避免错过免费种子；日期填错/过期就返回 None，退回普通每天。
+    """
+    from datetime import datetime
+
+    text = str(sub.get("recommend_date") or "")
+    if len(text) < 10:
+        return None
+    try:
+        hour, minute = (int(x) for x in str(sub.get("schedule_time") or "03:00").split(":"))
+        tzinfo = None
+        try:
+            from zoneinfo import ZoneInfo
+
+            tzinfo = ZoneInfo(tz)
+        except Exception:  # noqa: BLE001 - 老环境没 zoneinfo 就按本地
+            pass
+        return datetime(int(text[:4]), int(text[5:7]), int(text[8:10]), hour, minute, tzinfo=tzinfo)
+    except (ValueError, TypeError):
+        return None
+
+
 def build_trigger(sub: dict, tz: str):
     from apscheduler.triggers.cron import CronTrigger
     from apscheduler.triggers.interval import IntervalTrigger
@@ -90,10 +115,11 @@ def build_trigger(sub: dict, tz: str):
     if mode == "interval":
         return IntervalTrigger(minutes=max(5, int(sub.get("schedule_interval") or 120)), timezone=tz)
     hour, minute = (int(x) for x in str(sub.get("schedule_time") or "03:00").split(":"))
+    start = _recommend_start(sub, tz) if mode == "recommend" else None
     if mode == "weekly":
         return CronTrigger(day_of_week=sub.get("schedule_weekday") or "mon",
-                           hour=hour, minute=minute, timezone=tz)
-    return CronTrigger(hour=hour, minute=minute, timezone=tz)
+                           hour=hour, minute=minute, start_date=start, timezone=tz)
+    return CronTrigger(hour=hour, minute=minute, start_date=start, timezone=tz)
 
 
 # ---- 资源名精准匹配（排序用） ------------------------------------------------
@@ -171,8 +197,8 @@ def _name_tier(core: str, title: str) -> int:
 
 class PtSubscriber(_PluginBase):
     plugin_name = "定时订阅下载"
-    plugin_desc = "自己选周几几点，到指定站点搜资源并按详细规则下载到指定容器；自动对接 TMDB，按片名、年份、剧集/电影、集数逐项比对，只把真正这部排在最前。聊天入口不用打斜杠，一条说全最省事：「订阅 天下第一 观众 1080P 周一5:30」（片名/站点/清晰度/周期顺序随意）；也可以只发「订阅 天才女友」先列同名作品，回序号后再选「从第几集 / 哪些站 / 多久刷一次」，回「确定」立刻补搜并把能下的资源列出来让你挑；「查资源 仙逆 馒头 1080P」只搜一轮直接下，不建订阅。斜杠命令 /ptsub、/ptfind、/ptlist 一样可用；回复全是纯文本不带图。"
-    plugin_version = "1.9.9"
+    plugin_desc = "默认按 TMDB 推荐更新时间自动到指定站点搜资源（也可自选每天/每周指定星期几点），按详细规则下载到指定容器；自动对接 TMDB，按片名、年份、剧集/电影、集数逐项比对，只把真正这部排在最前，并把每集播出日列成表；读媒体库只补没入库的集，已下过的（含删掉的）不重下。聊天入口不用打斜杠，一条说全最省事：「订阅 天下第一 观众 1080P 周一5:30」（片名/站点/清晰度/周期顺序随意）；也可以只发「订阅 天才女友」先列同名作品，回序号后再选「从第几集 / 哪些站 / 多久刷一次」，回「确定」立刻补搜并把能下的资源列出来让你挑；「查资源 仙逆 馒头 1080P」只搜一轮直接下，不建订阅。斜杠命令 /ptsub、/ptfind、/ptlist 一样可用；回复全是纯文本不带图。"
+    plugin_version = "1.10.1"
     plugin_author = "wzy"
     plugin_config_prefix = "ptsubscriber_"
     plugin_order = 90
@@ -480,6 +506,18 @@ class PtSubscriber(_PluginBase):
         domains = sub.get("site_ids") or []
         keyword = search_keyword(sub)
         is_movie = (sub.get("kind") or "series") == "movie"
+        # 补搜前先对齐媒体库：已入库的集直接算「下到过」，只增不减。
+        # 用户把看过、腾空间的集删了也不会回头重下——台账（delivered_eps）记的是历史，
+        # 媒体库只是当前存量。这一条是「1-10 删了别再下 1-10」的保证。
+        if not is_movie and sub.get("tmdb_id"):
+            try:
+                lib = meta_library_eps(int(sub["tmdb_id"]), sub.get("season")) or []
+                self.store.set_sub_fields(sid, library_eps=lib, lib_synced=True)
+                if lib:
+                    self.store.mark_delivered(sid, lib)
+                sub = self.store.get_sub(sid) or sub
+            except Exception as exc:  # noqa: BLE001 - 媒体库读不到不影响补搜
+                logger.debug(f"[{self.plugin_name}] 补搜前读媒体库失败：{type(exc).__name__}: {exc}")
         # 填了集数区间就「一集一集补」（追更场景）；没填就一次把命中的都收下来（补老剧）
         one_by_one = (not is_movie) and bool(sub.get("ep_start") or sub.get("ep_end"))
         target = next_episode(sub) if one_by_one else None
@@ -505,6 +543,13 @@ class PtSubscriber(_PluginBase):
             result = self.bridge.search(domains, keyword, self._max_results)
             passed, _ = filter_candidates(sub, result["items"], self.store.hit_keys(),
                                           target_ep=target)
+            # 补老剧（没填集数区间）也要跳过台账里下过的集：
+            # 否则把 1-10 删了腾空间，下一轮又会把 1-10 重新下回来
+            if not one_by_one and not is_movie:
+                done_eps = {int(x) for x in (sub.get("delivered_eps") or [])}
+                if done_eps:
+                    passed = [r for r in passed
+                              if not (r.get("episode") and int(r["episode"]) in done_eps)]
             # 同一集可能有多个版本：按做种数优先，挑最稳的
             passed.sort(key=lambda x: (-(x.get("seeders") or 0), x.get("size_gb") or 0))
             entry["found"] = len(passed)
@@ -672,6 +717,33 @@ class PtSubscriber(_PluginBase):
             pass
 
     # ------------------------------------------------------- TMDB 元数据
+    def _refresh_schedule_cache(self, sub: dict) -> dict:
+        """保存后把「媒体库已入库集数」缓存到订阅（卡片显示用），
+        并给空的推荐更新日补上 TMDB 下一集播出日期（默认值，用户可改）。
+
+        已删掉看过的集（如 1-10）不会回头重下：台账 delivered_eps 记的是「下到过」，
+        删除只影响 media 库展示，不影响补搜目标。
+        任何一步读不到都当没这回事，绝不影响订阅本身。
+        """
+        sid = str(sub.get("id") or "")
+        if not sid:
+            return sub
+        try:
+            lib: list[int] = []
+            if sub.get("tmdb_id") and (sub.get("kind") or "series") != "movie":
+                lib = meta_library_eps(int(sub["tmdb_id"]), sub.get("season")) or []
+                if lib:
+                    self.store.mark_delivered(sid, lib)
+                self.store.set_sub_fields(sid, library_eps=lib, lib_synced=True)
+            if not (sub.get("recommend_date") or "").strip() and sub.get("tmdb_id"):
+                air = meta_air_dates(int(sub["tmdb_id"]), sub.get("season")) or {}
+                if air.get("next_air_date"):
+                    self.store.set_sub_fields(sid, recommend_date=air["next_air_date"])
+            return self.store.get_sub(sid) or sub
+        except Exception as exc:  # noqa: BLE001 - 读不到媒体库/TMDB 不影响订阅
+            logger.debug(f"[{self.plugin_name}] 刷新媒体库缓存失败：{type(exc).__name__}: {exc}")
+            return sub
+
     def _meta_stale(self, sub: dict, old: dict | None) -> bool:
         """名字/季/类型变了，或还没查到过海报，就重新查一次 TMDB。"""
         if not sub.get("poster_path"):
@@ -712,6 +784,16 @@ class PtSubscriber(_PluginBase):
             return {"ok": False, "message": f"{type(exc).__name__}: {str(exc)[:200]}"}
 
     def api_subs(self) -> dict:
+        # 老订阅升级上来还没跟媒体库对齐过（library_eps 空）：顺手补一次。
+        # 每次请求最多补 2 条，避免列表接口被 TMDB/DB 查询拖慢；补过即置 lib_synced 不再重试。
+        try:
+            pending = [s for s in self.store.subs()
+                       if s.get("tmdb_id") and not s.get("lib_synced")
+                       and (s.get("kind") or "series") != "movie"][:2]
+            for sub in pending:
+                self._refresh_schedule_cache(sub)
+        except Exception as exc:  # noqa: BLE001 - 补缓存失败不能影响列表加载
+            logger.debug(f"[{self.plugin_name}] 列表接口补媒体库缓存失败：{type(exc).__name__}: {exc}")
         items = self.store.public_subs()
         # 下次执行时间直接问调度器，避免重启后库里存的是旧值
         for item in items:
@@ -816,7 +898,8 @@ class PtSubscriber(_PluginBase):
             meta = resolve_meta(item.get("name") or "", item.get("kind") or "series",
                                 item.get("season"))
             if meta:
-                self.store.set_meta(str(item.get("id") or ""), meta)
+                fresh = self.store.set_meta(str(item.get("id") or ""), meta)
+                self._refresh_schedule_cache(fresh or item)
                 updated += 1
             else:
                 failed.append(str(item.get("name") or ""))
@@ -1054,8 +1137,9 @@ class PtSubscriber(_PluginBase):
                 except Exception as exc:  # noqa: BLE001 - 媒体库读不到不影响导入
                     logger.debug(f"[{self.plugin_name}] 导入时读媒体库失败：{type(exc).__name__}: {exc}")
             try:
-                self._fill_meta(self.store.get_sub(str(sub.get("id") or "")) or sub,
-                                int(item["tmdb_id"]) or None)
+                sub2 = self._fill_meta(self.store.get_sub(str(sub.get("id") or "")) or sub,
+                                       int(item["tmdb_id"]) or None)
+                self._refresh_schedule_cache(sub2)
             except Exception:
                 pass
             imported += 1
@@ -1137,6 +1221,8 @@ class PtSubscriber(_PluginBase):
             elif self._meta_stale(sub, old):
                 # 新建或改了名字/季数时顺手查一次，卡片立刻就有海报和总集数
                 sub = self._fill_meta(sub)
+            # 缓存媒体库已入库集数 + 补默认推荐更新日（卡片 / 执行时间展示用）
+            sub = self._refresh_schedule_cache(sub)
             self._rebuild_jobs()
             item = {**sub, "rules_summary": parse_rules(sub.get("rules")).summary()}
             item["done_eps"] = len(sub.get("delivered_eps") or [])

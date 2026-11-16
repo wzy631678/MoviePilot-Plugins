@@ -1,5 +1,5 @@
 /* PtSubscriber 插件页面：原生 DOM，无构建工具，宿主注入的 api 负责鉴权。 */
-const UI_VERSION = '1.2.8';
+const UI_VERSION = '1.3.1';
 const CSS = `
 .pts-root,.pts-ov{--acc:#8b5cf6;--acc2:#a78bfa;--sur:#ffffff;--sur2:#f7f7fb;--sur3:#eeeef6;--on:#1f2230;--muted:rgba(31,34,48,.58);--line:rgba(17,24,39,.1);--soft:rgba(139,92,246,.12);--danger:#dc2626;--ok:#16a34a;--warn:#b45309}
 .pts-dark{--sur:#1b1e26;--sur2:#232733;--sur3:#2b3040;--on:#e9ebf2;--muted:rgba(233,235,242,.6);--line:rgba(255,255,255,.12);--soft:rgba(139,92,246,.22);--danger:#f87171;--ok:#4ade80;--warn:#fbbf24}
@@ -170,6 +170,14 @@ const CSS = `
 .pts-warn.ok::before{content:'✓ '}
 .pts-warn.tip{color:var(--muted);background:var(--sur2);border-color:var(--line)}
 .pts-warn.tip::before{content:'· '}
+/* 每集更新时间表：第几集 ↔ 哪天播，一眼对上，不用自己算 */
+.pts-epgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:4px 8px;padding:2px 0}
+.pts-eprow{display:flex;gap:6px;align-items:baseline;font-size:11.6px;color:var(--muted);padding:3px 7px;border-radius:7px;background:var(--sur2)}
+.pts-eprow b{color:var(--on);font-weight:650;flex:none}
+.pts-epdate{font-variant-numeric:tabular-nums;flex:none}
+.pts-eprow.next{background:var(--soft);color:var(--acc);box-shadow:inset 0 0 0 1px rgba(139,92,246,.35)}
+.pts-eprow.next b{color:var(--acc)}
+.pts-epname{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.8}
 .pts-mp-list{max-height:min(50vh,440px);overflow:auto;border:1px solid var(--line);border-radius:12px;padding:2px 12px;background:var(--sur)}
 .pts-mp-row{display:flex;gap:10px;align-items:flex-start;padding:10px 2px;border-bottom:1px solid var(--line);cursor:pointer}
 .pts-mp-row:last-child{border-bottom:0}
@@ -737,7 +745,7 @@ export function mountUI(root, api) {
   const logo = el('div', 'pts-logo');
   logo.append(iconEl('bolt', 20));
   const headMid = el('div', 'pts-head-mid');
-  headMid.append(el('h2', '', '定时订阅下载'), el('p', '', '选好周几几点，自动到指定站点搜资源并按规则下载到下载器'));
+  headMid.append(el('h2', '', '定时订阅下载'), el('p', '', '按 TMDB 推荐更新时间到指定站点搜资源，也可自己定每天/每周几点'));
   // 版本角标：界面长得不对时先看这里，确认浏览器是不是还在用旧缓存
   const verTag = el('span', 'pts-ver', 'v' + UI_VERSION);
   verTag.title = '界面版本；如果不是最新版，按 Ctrl+F5 强制刷新';
@@ -1166,6 +1174,23 @@ export function mountUI(root, api) {
     return raw.slice(0, 10);
   }
 
+  // 「下次执行」压成短文案：今天 03:00 / 明天 03:00 / 12/01 03:00
+  function nextLabel(text) {
+    const raw = String(text || '').trim();
+    if (!raw) return '';
+    const t = Date.parse(raw.replace(' ', 'T'));
+    if (!isFinite(t)) return raw.slice(5, 16);
+    const d = new Date(t);
+    const now = new Date();
+    const hm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+    const dayOf = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+    const diff = Math.round((dayOf(d) - dayOf(now)) / 86400000);
+    if (diff === 0) return '今天 ' + hm;
+    if (diff === 1) return '明天 ' + hm;
+    if (diff === 2) return '后天 ' + hm;
+    return String(d.getMonth() + 1).padStart(2, '0') + '/' + String(d.getDate()).padStart(2, '0') + ' ' + hm;
+  }
+
   async function runSub(sub) {
     try {
       const r = await call('POST', 'sub/run', { id: sub.id });
@@ -1273,25 +1298,55 @@ export function mountUI(root, api) {
     prog.append(iconEl('download', 13));
     const done = Number(sub.done_eps || 0);
     const total = Number(sub.total_eps || 0);
+    // 主数字用「订阅区间」：订阅 165-200 就显示 3/36，和表单里的集数对得上；
+    // 分母用整季 200 集时，外面的卡片和里面的填写永远看着像两个任务。
+    const scTotal = Number(sub.scope_total || 0);
+    const scDone = Number(sub.scope_done || 0);
+    const scLeft = Number(sub.scope_left || 0);
+    const scStart = Number(sub.scope_start || 0) || 1;
+    const scEnd = Number(sub.scope_end || 0) || total;
+    const lib = Number(sub.lib_count || 0) || (sub.library_eps ? sub.library_eps.length : 0);
+    const high = Number(sub.high_ep || 0);
     if (sub.kind === 'movie') {
       prog.append(el('b', '', done ? '已下载' : '电影'));
-    } else if (total) {
-      prog.append(el('b', '', done + '/' + total));
-      prog.title = '补搜进度 ' + Math.min(100, Math.round((done / total) * 100)) + '%';
+    } else if (scTotal) {
+      prog.append(el('b', '', scDone + '/' + scTotal));
+      prog.title = `订阅第 ${scStart}~${scEnd} 集，共 ${scTotal} 集`
+        + `；已下 ${scDone} 集，还差 ${scLeft} 集`
+        + (high ? `（已下到第 ${high} 集，删掉的集不会再重下）` : '')
+        + (lib ? `；媒体库现有 ${lib} 集` : '');
+      if (scLeft) prog.append(el('span', 'pts-muted', ' · 剩' + scLeft + '集'));
     } else {
-      prog.append(el('b', '', done ? done + ' 集' : '待补搜'));
+      prog.append(el('b', '', done || lib ? (done || lib) + ' 集' : '待补搜'));
     }
     bodyEl.append(prog, el('span', 'sp'));
-    const when = el('span', '', ago(sub.last_run_at));
-    if (sub.next_run_at) when.title = '下次执行 ' + sub.next_run_at;
+    // 右下角：优先显示「下次什么时候跑」，任务墙看的是节奏；
+    // 没有下次就跑过的，回退到上次执行时间；一次都没跑过的写「待首跑」。
+    let whenText = '';
+    let whenTitle = '';
+    if (sub.next_run_at) {
+      whenText = nextLabel(sub.next_run_at);
+      whenTitle = '下次执行 ' + sub.next_run_at;
+    } else if (sub.last_run_at) {
+      whenText = ago(sub.last_run_at);
+      whenTitle = '上次执行 ' + sub.last_run_at;
+    } else {
+      whenText = sub.enabled ? '待首跑' : '已停用';
+      whenTitle = sub.enabled ? '还没执行过，保存后按计划自动跑' : '订阅已停用';
+    }
+    if (sub.last_run_at && sub.next_run_at) {
+      whenTitle += '；上次 ' + sub.last_run_at + (sub.last_status === 'ok' ? '（成功）' : '');
+    }
+    const when = el('span', '', whenText);
+    when.title = whenTitle;
     bodyEl.append(when);
     card.append(bodyEl);
 
-    // 底部细进度条：一眼看出补到哪儿了
-    if (sub.kind !== 'movie' && total > 0) {
+    // 底部细进度条：同样按区间画，填满就代表这个任务下完了
+    if (sub.kind !== 'movie' && scTotal > 0) {
       const bar = el('div', 'pts-pbar');
       const fill = el('span');
-      fill.style.width = Math.min(100, Math.round((done / total) * 100)) + '%';
+      fill.style.width = Math.min(100, Math.round((scDone / scTotal) * 100)) + '%';
       bar.append(fill);
       card.append(bar);
     }
@@ -1415,9 +1470,59 @@ export function mountUI(root, api) {
           autoRecommend = advance.next_air_date;
         }
       }
+      renderEpSchedule();
       sync();
     }
-    sec1.append(g1, metaPicker.node, g1b, recommendWrap, recWarn);
+    // ① 每集更新时间表：TMDB 给了整季播出表就列出来，第几集＝哪天一眼对上
+    //    （用户原话：别只给一个日期，谁知道那日期是第几集？把每集对应的时间摊开看）
+    const epFold = document.createElement('details');
+    epFold.className = 'pts-fold pts-epfold';
+    epFold.style.marginTop = '8px';
+    epFold.style.display = 'none';
+    const epSum = document.createElement('summary');
+    epSum.className = 'pts-sec-h';
+    epSum.append(el('h4', '', '每集更新时间'),
+      el('span', 'pts-muted', 'TMDB 播出表 · 点开看第几集哪天播'));
+    epFold.append(epSum);
+    const epBody = el('div', 'pts-fold-body');
+    epFold.append(epBody);
+    function renderEpSchedule() {
+      const all = (advance && advance.eps) || [];
+      const movie = segKind.get() === 'movie';
+      if (movie || !all.length) {
+        epFold.style.display = 'none';
+        return;
+      }
+      // 只列订阅区间内的集：订阅 165-200 就列这 36 集，
+      // 免得整季 200 集全铺出来，反而看不出这次要下哪几集。
+      const from = numOrNull(fEpStart) || 0;
+      const to = numOrNull(fEpEnd) || 0;
+      let eps = all;
+      let note = '';
+      if (from || to) {
+        const picked = all.filter((x) => (!from || x.ep >= from) && (!to || x.ep <= to));
+        if (picked.length) {
+          eps = picked;
+        } else {
+          note = '（订阅区间在这季播出表里没有对应集，下面列的是整季）';
+        }
+      }
+      epFold.style.display = '';
+      const nextEp = advance && advance.next_ep;
+      const grid = el('div', 'pts-epgrid');
+      for (const item of eps) {
+        const row = el('div', 'pts-eprow' + (item.ep === nextEp ? ' next' : ''));
+        row.append(el('b', '', '第 ' + item.ep + ' 集'), el('span', 'pts-epdate', shortDay(item.air_date)));
+        if (item.name) row.append(el('span', 'pts-epname', item.name));
+        if (item.ep === nextEp) row.title = '下一集：' + item.air_date + ' 播出（推荐更新日）';
+        grid.append(row);
+      }
+      epBody.innerHTML = '';
+      epBody.append(grid);
+      epSum.querySelector('.pts-muted').textContent =
+        `第 ${eps[0].ep}~${eps[eps.length - 1].ep} 集 · 共 ${eps.length} 集播出表` + note;
+    }
+    sec1.append(g1, metaPicker.node, g1b, recommendWrap, recWarn, epFold);
     // 电影没有季/集概念，选了电影就把这两行收起来
     function applyKind() {
       const movie = segKind.get() === 'movie';
@@ -1425,6 +1530,7 @@ export function mountUI(root, api) {
       g1b.style.display = movie ? 'none' : '';
       recommendWrap.style.display = movie ? 'none' : '';
       recWarn.style.display = 'none';
+      renderEpSchedule();
     }
     applyKind();
 
@@ -1498,13 +1604,31 @@ export function mountUI(root, api) {
     if (hasRules) sec2.open = true;
     mainCol.append(sec2);
 
-    // ③ 执行计划
+    // ③ 执行时间（原「执行计划」）：默认跟着 TMDB 推荐时间走，也可切成自定义每天/每周
     const sec3 = el('div', 'pts-sec');
     const h3 = el('div', 'pts-sec-h');
-    h3.append(el('h4', '', '执行计划'));
-    sec3.append(h3, el('div', 'pts-sec-desc', '到点自动去上面勾选的站点搜索，命中规则就提交到下载器'));
+    h3.append(el('h4', '', '执行时间'));
+    sec3.append(h3, el('div', 'pts-sec-desc',
+      '默认按上面的推荐更新日：那集哪天播，当天就去站点找，抢免费种子；也可自己定每天/每周几点'));
+    // 模式：按 TMDB 推荐时间（默认） / 自定义
+    const segMode = segmented([
+      { value: 'recommend', label: '按 TMDB 推荐时间' },
+      { value: 'custom', label: '自定义' },
+    ], (sub && sub.schedule_mode && sub.schedule_mode !== 'recommend') ? 'custom' : 'recommend', sync);
+    const modeRow = el('div', 'pts-f');
+    modeRow.style.marginBottom = '12px';
+    modeRow.append(el('span', '', '模式'), segMode.node);
+    sec3.append(modeRow);
+
+    // 推荐模式下的说明条：第几集、哪天、每天几点自动搜
+    const recModeHint = el('div', 'pts-warn tip');
+    recModeHint.style.display = 'none';
+    sec3.append(recModeHint);
+
+    // 自定义：频率（每天 / 每周指定星期）
     const seg = segmented([{ value: 'daily', label: '每天' }, { value: 'weekly', label: '每周指定星期' }],
-      (sub && sub.schedule_mode) || 'daily', sync);
+      (sub && (sub.schedule_mode === 'daily' || sub.schedule_mode === 'weekly'))
+        ? sub.schedule_mode : 'daily', sync);
     const segRow = el('div', 'pts-f');
     segRow.style.marginBottom = '12px';
     segRow.append(el('span', '', '频率'), seg.node);
@@ -1518,6 +1642,7 @@ export function mountUI(root, api) {
     const wrapTime = field('时间', fTime);
     const wrapWeekday = field('星期', fWeekday);
     const wrapInterval = field('间隔（分钟）', fInterval);
+    wrapTime.title = '每天几点去站点搜（推荐模式下从推荐更新日那天开始）';
     g3.append(wrapTime, wrapWeekday, wrapInterval);
     sec3.append(g3);
 
@@ -1539,7 +1664,7 @@ export function mountUI(root, api) {
     aside.append(el('div', 'pts-sum-title', '配置摘要'));
     const sum = {};
     for (const [key, label] of [['name', '任务名'], ['sites', '站点'], ['tmdb', 'TMDB 作品'],
-      ['downloader', '下载器'], ['target', '保存到'], ['rules', '资源规则'], ['plan', '执行计划'],
+      ['downloader', '下载器'], ['target', '保存到'], ['rules', '资源规则'], ['plan', '执行时间'],
       ['eps', '集数'], ['recommend', '推荐更新'], ['notify', '通知'], ['status', '状态']]) {
       const row = el('div', 'pts-sum-row');
       row.append(el('span', '', label), el('b', '', '—'));
@@ -1573,19 +1698,42 @@ export function mountUI(root, api) {
       node.addEventListener('input', sync);
       node.addEventListener('change', sync);
     }
+    // 改了集数区间就得重列播出表，否则表里还是整季的集
+    fEpStart.addEventListener('change', renderEpSchedule);
+    fEpEnd.addEventListener('change', renderEpSchedule);
 
     function sync() {
-      const mode = seg.get();
-      wrapTime.style.display = mode === 'interval' ? 'none' : '';
-      wrapWeekday.style.display = mode === 'weekly' ? '' : 'none';
-      wrapInterval.style.display = mode === 'interval' ? '' : 'none';
+      const recMode = segMode.get() === 'recommend';
+      const mode = seg.get();               // 自定义频率：daily / weekly
+      // 推荐模式：只要「每天几点」；频率/星期/间隔都收起来，由推荐更新日驱动
+      segRow.style.display = recMode ? 'none' : '';
+      wrapTime.style.display = '';
+      wrapWeekday.style.display = (!recMode && mode === 'weekly') ? '' : 'none';
+      wrapInterval.style.display = 'none';  // UI 不再提供「按间隔」，保留字段兼容老数据
       const retry = Number(fRetry.value) || 0;
       const win = Number(fWindow.value) || 0;
       const retryText = retry && win
         ? `；搜到就下，没更新就每 ${retry} 分钟再搜一次，最多守 ${win} 分钟`
         : '；只按计划搜一次，没更新就等下次';
-      planHint.textContent = scheduleText(mode, fTime.value, fWeekday.value, fInterval.value)
-        + retryText + '。每轮只补「下一个还没下到的集」，下过的不会再下。';
+      const tail = '。每轮只补「下一个还没下到的集」，下过的（含你删掉的）不会再下。';
+      const recDate = fRecommend.value.trim();
+      const nextEpRec = advance && advance.next_ep;
+      if (recMode) {
+        const epName = nextEpRec ? `第 ${nextEpRec} 集` : '下一集';
+        const day = recDate ? shortDay(recDate) : '';
+        recModeHint.style.display = '';
+        recModeHint.textContent = day
+          ? `按 TMDB 推荐时间：${epName} ${day} 更新后，每天 ${fTime.value || '03:00'} 自动去勾选站点搜，播完当天就能抓种。`
+          : '还没拿到 TMDB 推荐更新日：保存后会自动补上；也可以在上面「推荐更新日」手动填。';
+        planHint.textContent = (day
+          ? `从 ${recDate} 起，每天 ${fTime.value || '03:00'} 到勾选站点搜资源`
+          : `每天 ${fTime.value || '03:00'} 到勾选站点搜资源（推荐日未知时按每天守候）`)
+          + retryText + tail;
+      } else {
+        recModeHint.style.display = 'none';
+        planHint.textContent = scheduleText(mode, fTime.value, fWeekday.value, fInterval.value)
+          + retryText + tail;
+      }
 
       const domains = picker.get();
       sum.name.textContent = fName.value.trim() || '未填写';
@@ -1623,14 +1771,22 @@ export function mountUI(root, api) {
         sum.tmdb.textContent = fName.value.trim() ? '未关联，按名字搜' : '—';
         sum.tmdb.className = fName.value.trim() ? 'warn' : '';
       }
-      sum.plan.textContent = scheduleText(mode, fTime.value, fWeekday.value, fInterval.value)
-        + (retry && win ? `，没更新 ${retry} 分钟后再搜` : '');
+      sum.plan.textContent = recMode
+        ? `按推荐时间${recDate ? '（' + shortDay(recDate) + ' 起）' : ''} · 每天 ${fTime.value || '03:00'}`
+        : scheduleText(mode, fTime.value, fWeekday.value, fInterval.value)
+          + (retry && win ? `，没更新 ${retry} 分钟后再搜` : '');
       const a = numOrNull(fEpStart);
       const b = numOrNull(fEpEnd);
       const season = numOrNull(fSeason);
       const parts = [];
       if (season) parts.push(`第 ${season} 部`);
-      if (a || b) parts.push(`第 ${a ?? 1} ~ ${b ?? '∞'} 集`);
+      if (a || b) {
+        const from = a || 1;
+        const to = b || 0;
+        const span = to && to >= from ? to - from + 1 : 0;
+        // 区间集数写出来，卡片上的「3/36」才有出处，不然外面的数字看着像凭空来的
+        parts.push(`第 ${from} ~ ${b ?? '∞'} 集` + (span ? `（共 ${span} 集）` : ''));
+      }
       if (!parts.length && meta && meta.total_eps) {
         parts.push(`共 ${meta.total_eps} 集`
           + ((meta.season_count || 0) > 1 ? ` · ${meta.season_count} 季` : ''));
@@ -1753,7 +1909,7 @@ export function mountUI(root, api) {
         downloader_id: fDownloader.value,
         qb_category: '',
         save_path: fSavePath.value.trim(),
-        schedule_mode: seg.get(),
+        schedule_mode: segMode.get() === 'recommend' ? 'recommend' : seg.get(),
         schedule_time: fTime.value || '03:00',
         schedule_weekday: fWeekday.value,
         schedule_interval: Number(fInterval.value) || 120,
