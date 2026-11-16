@@ -80,7 +80,7 @@ class PtSubSubscribeInput(BaseModel):
     )
     time: Optional[str] = Field(
         default=None,
-        description="每天几点去搜，HH:MM，如 03:00；用户说「每天凌晨3点」就传 03:00。",
+        description="每天几点去搜，HH:MM，默认 20:00（TMDB 只给日期，出种多在晚上）；用户说「凌晨3点」就传 03:00。",
     )
     interval: Optional[int] = Field(
         default=None,

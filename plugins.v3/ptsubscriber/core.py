@@ -66,6 +66,8 @@ class Store:
             body["library_eps"] = old.get("library_eps") or []
         if old and "recommend_date" not in payload:
             body["recommend_date"] = old.get("recommend_date") or ""
+        if old and "air_state" not in payload:
+            body["air_state"] = old.get("air_state") or ""
         try:
             model = SubscriptionIn(**body)
         except ValidationError as exc:
@@ -161,6 +163,24 @@ class Store:
                 item["next_run_at"] = when
                 self.save_subs(items)
                 return
+
+    def migrate_evening_default(self) -> int:
+        """把早期默认的「每天 03:00」换成 20:00。
+
+        TMDB 只给「哪天」播出，真正出种基本在当晚 19 点以后；03:00 是插件早期的默认值，
+        留着会让订阅比首播晚半天、错过免费种子的窗口。
+        只改等于 03:00 的记录（那是老默认值），用户自己改成别的时间点一律不动。
+        """
+        items = self.subs()
+        changed = 0
+        for sub in items:
+            if str(sub.get("schedule_time") or "") != "03:00":
+                continue
+            sub["schedule_time"] = "20:00"
+            changed += 1
+        if changed:
+            self.save_subs(items)
+        return changed
 
     def set_sub_fields(self, sid: str, **fields) -> dict | None:
         """给一条订阅就地补几个字段（媒体库缓存 / 推荐更新日等）。"""

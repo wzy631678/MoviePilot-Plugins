@@ -408,7 +408,7 @@ def schedule_text(opts: dict[str, Any] | None) -> str:
             return f"每 {minutes // 60} 小时" if minutes % 60 == 0 and minutes >= 60 else f"每 {minutes} 分钟"
     if mode == "weekly":
         day = _WEEK_CN.get(str(opts.get("schedule_weekday") or "mon"), "一")
-        return f"每周{day} {opts.get('schedule_time') or '03:00'}"
+        return f"每周{day} {opts.get('schedule_time') or '20:00'}"
     if mode == "recommend":
         rec = str(opts.get("recommend_date") or "").strip()
         return f"按推荐时间（{rec} 起）" if rec else "按推荐时间"

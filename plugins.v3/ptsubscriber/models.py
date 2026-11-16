@@ -34,7 +34,9 @@ class SubscriptionIn(BaseModel):
     save_path: str = ""
     # recommend = 按 TMDB 推荐时间（recommend_date 那天起每天守候，不手动定星期几几点）
     schedule_mode: Literal["recommend", "daily", "weekly", "interval"] = "recommend"
-    schedule_time: str = "03:00"
+    # 默认晚上 20:00：TMDB 的推荐更新日只有「哪天」，真正出种多在当晚 19 点以后，
+    # 凌晨 3 点去搜往往比首播晚了半天，免费种子的窗口已经过了。
+    schedule_time: str = "20:00"
     schedule_weekday: Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"] = "mon"
     schedule_interval: int = 120
     # 本轮没搜到（还没更新）时，每 retry_interval 分钟再搜一次，
@@ -47,6 +49,8 @@ class SubscriptionIn(BaseModel):
     # 推荐更新时间：默认取 TMDB 下一集播出日期（真实时间），用户可在表单里自己改。
     # 只作参考展示，不强制驱动调度——用户说「这个是推荐时间真实时间让我可以自己选择」。
     recommend_date: str = ""
+    # TMDB 播出状态缓存：airing=还在更，finished=整季已播完，unknown=查过但没播出日，""=还没查
+    air_state: Literal["", "airing", "finished", "unknown"] = ""
 
     @field_validator("recommend_date")
     @classmethod
@@ -189,6 +193,24 @@ def next_episode(sub: dict) -> int | None:
     return None
 
 
+def recommend_from_air(air: dict) -> tuple[str, str]:
+    """按 TMDB 播出表给出「推荐更新日」和「播出状态」。
+
+    - 还没播的下一集优先（airing）：那天去站点最容易抓到免费种。
+    - 整季已播完（如 Doctor X 12/12）：拿最后一集的播出日兜底（finished），
+      不然「推荐更新」永远挂着红色的「未设置」，用户不知道该盯哪天。
+    - TMDB 一个日期都没给（unknown）：留空，界面写「每天守候」，照常按天跑。
+    """
+    air = air or {}
+    nxt = str(air.get("next_air_date") or "")
+    last = str(air.get("last_air_date") or "")
+    if nxt:
+        return nxt, "airing"
+    if last:
+        return last, "finished"
+    return "", "unknown"
+
+
 def episode_scope(sub: dict) -> dict:
     """订阅的集数区间：从第几集到第几集、一共几集、已下几集、还差几集。
 
@@ -219,7 +241,10 @@ def search_keyword(sub: dict) -> str:
 
 
 def episode_progress(sub: dict) -> str:
-    """卡片上显示的补搜进度，例如「已下 3/36 集 · 下一个第 168 集」。"""
+    """补搜进度，例如「已下 3 集 / 共 36 集 · 下一个第 168 集」。
+
+    不用「3/36」这种斜杠写法：和日期（11/21）长得一样，用户会看混。
+    """
     if (sub.get("kind") or "series") == "movie":
         return "电影 · 下到即止"
     sc = episode_scope(sub)
@@ -227,8 +252,10 @@ def episode_progress(sub: dict) -> str:
         return f"第 {sc['start']} 集起，一集一集补"
     nxt = next_episode(sub)
     if nxt is None:
-        return f"区间已补齐（{sc['done']}/{sc['total']} 集）" if sc["total"] else f"已下 {sc['done']} 集"
-    return f"已下 {sc['done']}/{sc['total']} 集 · 下一个第 {nxt} 集"
+        return (f"区间已补齐（共 {sc['total']} 集）" if sc["total"]
+                else f"已下 {sc['done']} 集")
+    total_text = f" / 共 {sc['total']} 集" if sc["total"] else ""
+    return f"已下 {sc['done']} 集{total_text} · 下一个第 {nxt} 集"
 
 
 def parse_episode(title: str) -> int | None:
@@ -305,7 +332,7 @@ def schedule_label(sub: dict) -> str:
     避免错过免费种子；用户也可在「执行时间」里切回自定义每天/每周。
     """
     mode = sub.get("schedule_mode", "daily")
-    time_text = sub.get("schedule_time") or "03:00"
+    time_text = sub.get("schedule_time") or "20:00"
     retry = int(sub.get("retry_interval") or 0)
     window = int(sub.get("retry_window") or 0)
     tail = f"；没更新就每 {retry} 分钟再搜，最多守 {window} 分钟" if retry and window else ""

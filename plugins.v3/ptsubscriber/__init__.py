@@ -30,7 +30,13 @@ from .meta import search as search_meta
 from .meta import search_fast as search_meta_fast
 from .meta import air_dates as meta_air_dates
 from .meta import library_eps as meta_library_eps
-from .models import next_episode, resolution_of, schedule_label, search_keyword
+from .models import (
+    next_episode,
+    recommend_from_air,
+    resolution_of,
+    schedule_label,
+    search_keyword,
+)
 from .mp_adapter import MPBridge
 from .rules import RULE_OPTIONS, parse_rules
 
@@ -94,7 +100,7 @@ def _recommend_start(sub: dict, tz: str):
     if len(text) < 10:
         return None
     try:
-        hour, minute = (int(x) for x in str(sub.get("schedule_time") or "03:00").split(":"))
+        hour, minute = (int(x) for x in str(sub.get("schedule_time") or "20:00").split(":"))
         tzinfo = None
         try:
             from zoneinfo import ZoneInfo
@@ -114,7 +120,7 @@ def build_trigger(sub: dict, tz: str):
     mode = sub.get("schedule_mode", "daily")
     if mode == "interval":
         return IntervalTrigger(minutes=max(5, int(sub.get("schedule_interval") or 120)), timezone=tz)
-    hour, minute = (int(x) for x in str(sub.get("schedule_time") or "03:00").split(":"))
+    hour, minute = (int(x) for x in str(sub.get("schedule_time") or "20:00").split(":"))
     start = _recommend_start(sub, tz) if mode == "recommend" else None
     if mode == "weekly":
         return CronTrigger(day_of_week=sub.get("schedule_weekday") or "mon",
@@ -198,7 +204,7 @@ def _name_tier(core: str, title: str) -> int:
 class PtSubscriber(_PluginBase):
     plugin_name = "定时订阅下载"
     plugin_desc = "默认按 TMDB 推荐更新时间自动到指定站点搜资源（也可自选每天/每周指定星期几点），按详细规则下载到指定容器；自动对接 TMDB，按片名、年份、剧集/电影、集数逐项比对，只把真正这部排在最前，并把每集播出日列成表；读媒体库只补没入库的集，已下过的（含删掉的）不重下。聊天入口不用打斜杠，一条说全最省事：「订阅 天下第一 观众 1080P 周一5:30」（片名/站点/清晰度/周期顺序随意）；也可以只发「订阅 天才女友」先列同名作品，回序号后再选「从第几集 / 哪些站 / 多久刷一次」，回「确定」立刻补搜并把能下的资源列出来让你挑；「查资源 仙逆 馒头 1080P」只搜一轮直接下，不建订阅。斜杠命令 /ptsub、/ptfind、/ptlist 一样可用；回复全是纯文本不带图。"
-    plugin_version = "1.10.1"
+    plugin_version = "1.10.2"
     plugin_author = "wzy"
     plugin_config_prefix = "ptsubscriber_"
     plugin_order = 90
@@ -226,6 +232,13 @@ class PtSubscriber(_PluginBase):
         self._max_results = max(10, min(200, int(cfg.get("max_results") or 50)))
         self.store = Store(PluginDataBackend(self))
         self.bridge = MPBridge(logger)
+        # 老订阅的「每天 03:00」是插件早期默认值，换成晚上 20:00（自己定过时间的模式不动）
+        try:
+            fixed = self.store.migrate_evening_default()
+            if fixed:
+                logger.info(f"[{self.plugin_name}] {fixed} 条订阅的默认执行时间由 03:00 改为 20:00")
+        except Exception as exc:  # noqa: BLE001 - 迁移失败不影响启动
+            logger.debug(f"[{self.plugin_name}] 执行时间迁移跳过：{type(exc).__name__}: {exc}")
         # 智能体工具靠模块级引用拿插件实例；重载后指向新实例
         try:
             remote.plugin_ref = self
@@ -735,10 +748,15 @@ class PtSubscriber(_PluginBase):
                 if lib:
                     self.store.mark_delivered(sid, lib)
                 self.store.set_sub_fields(sid, library_eps=lib, lib_synced=True)
-            if not (sub.get("recommend_date") or "").strip() and sub.get("tmdb_id"):
+            if sub.get("tmdb_id") and (sub.get("kind") or "series") != "movie":
+                # 推荐更新日自动补全：先看还没播的下一集；整季已经播完（如 Doctor X 12/12）
+                # 就用最后一集的播出日兜底，别让「推荐更新」永远挂着红色的「未设置」。
                 air = meta_air_dates(int(sub["tmdb_id"]), sub.get("season")) or {}
-                if air.get("next_air_date"):
-                    self.store.set_sub_fields(sid, recommend_date=air["next_air_date"])
+                rec, state = recommend_from_air(air)
+                patch: dict = {"air_state": state}
+                if rec and not (sub.get("recommend_date") or "").strip():
+                    patch["recommend_date"] = rec
+                self.store.set_sub_fields(sid, **patch)
             return self.store.get_sub(sid) or sub
         except Exception as exc:  # noqa: BLE001 - 读不到媒体库/TMDB 不影响订阅
             logger.debug(f"[{self.plugin_name}] 刷新媒体库缓存失败：{type(exc).__name__}: {exc}")
@@ -784,12 +802,13 @@ class PtSubscriber(_PluginBase):
             return {"ok": False, "message": f"{type(exc).__name__}: {str(exc)[:200]}"}
 
     def api_subs(self) -> dict:
-        # 老订阅升级上来还没跟媒体库对齐过（library_eps 空）：顺手补一次。
-        # 每次请求最多补 2 条，避免列表接口被 TMDB/DB 查询拖慢；补过即置 lib_synced 不再重试。
+        # 老订阅升级上来还没跟媒体库对齐过（library_eps 空），或还没查过播出状态（air_state 空）：
+        # 顺手补一次推荐更新日 + 媒体库集数。每次请求最多补 2 条，避免列表接口被 TMDB
+        # 查询拖慢；补过一次就置位（查不到也记 unknown），不会每次打开页面都重查。
         try:
             pending = [s for s in self.store.subs()
-                       if s.get("tmdb_id") and not s.get("lib_synced")
-                       and (s.get("kind") or "series") != "movie"][:2]
+                       if s.get("tmdb_id") and (s.get("kind") or "series") != "movie"
+                       and (not s.get("lib_synced") or not s.get("air_state"))][:2]
             for sub in pending:
                 self._refresh_schedule_cache(sub)
         except Exception as exc:  # noqa: BLE001 - 补缓存失败不能影响列表加载
@@ -1522,8 +1541,8 @@ class PtSubscriber(_PluginBase):
 
     @staticmethod
     def _default_plan_text() -> str:
-        """新订阅的默认刷新计划（模型默认每天 03:00）。"""
-        return "每天 03:00"
+        """新订阅的默认刷新计划（模型默认每天 20:00）。"""
+        return "每天 20:00"
 
     # ------------------------------------------------------------------ /ptsub
     def remote_sub(self, arg: str, key: str = "") -> str:
