@@ -1,5 +1,5 @@
 /* PtSubscriber 插件页面：原生 DOM，无构建工具，宿主注入的 api 负责鉴权。 */
-const UI_VERSION = '1.3.5';
+const UI_VERSION = '1.3.6';
 const CSS = `
 .pts-root,.pts-ov{--acc:#8b5cf6;--acc2:#a78bfa;--sur:#ffffff;--sur2:#f7f7fb;--sur3:#eeeef6;--on:#1f2230;--muted:rgba(31,34,48,.58);--line:rgba(17,24,39,.1);--soft:rgba(139,92,246,.12);--danger:#dc2626;--ok:#16a34a;--warn:#b45309}
 .pts-dark{--sur:#1b1e26;--sur2:#232733;--sur3:#2b3040;--on:#e9ebf2;--muted:rgba(233,235,242,.6);--line:rgba(255,255,255,.12);--soft:rgba(139,92,246,.22);--danger:#f87171;--ok:#4ade80;--warn:#fbbf24}
@@ -759,7 +759,9 @@ function isDark() {
   return false;
 }
 
-export function mountUI(root, api) {
+export function mountUI(root, api, opts) {
+  // wall：侧栏入口用的「任务墙」视图，只渲染订阅任务面板，不带 tabbar/找资源/运行记录
+  const wallOnly = !!(opts && opts.mode === 'wall');
   root.innerHTML = '';
   root.classList.add('pts-root');
   root.classList.toggle('pts-dark', isDark());
@@ -782,7 +784,10 @@ export function mountUI(root, api) {
   const logo = el('div', 'pts-logo');
   logo.append(iconEl('bolt', 20));
   const headMid = el('div', 'pts-head-mid');
-  headMid.append(el('h2', '', '定时订阅下载'), el('p', '', '按 TMDB 推荐更新时间到指定站点搜资源，也可自己定每天/每周几点'));
+  headMid.append(el('h2', '', '定时订阅下载'),
+    el('p', '', wallOnly
+      ? '任务墙 · 按 TMDB 推荐更新时间到指定站点搜资源'
+      : '按 TMDB 推荐更新时间到指定站点搜资源，也可自己定每天/每周几点'));
   // 版本角标：界面长得不对时先看这里，确认浏览器是不是还在用旧缓存
   const verTag = el('span', 'pts-ver', 'v' + UI_VERSION);
   verTag.title = '界面版本；如果不是最新版，按 Ctrl+F5 强制刷新';
@@ -795,20 +800,29 @@ export function mountUI(root, api) {
   head.append(logo, headMid, btnRefresh);
   root.append(head);
 
-  const tabbar = el('div', 'pts-tabs');
-  for (const [key, label] of tabs) {
-    const b = button(label, () => switchTab(key), 'pts-tab' + (key === state.tab ? ' active' : ''));
-    b.dataset.tab = key;
-    tabbar.append(b);
-  }
-  root.append(tabbar);
-  for (const [key] of tabs) {
-    const p = el('div', 'pts-panel' + (key === state.tab ? ' active' : ''));
-    panels[key] = p;
+  let tabbar = null;
+  if (wallOnly) {
+    // 侧栏任务墙：只建订阅面板，省掉 tabbar / 找资源 / 运行记录
+    const p = el('div', 'pts-panel active');
+    panels.subs = p;
     root.append(p);
+  } else {
+    tabbar = el('div', 'pts-tabs');
+    for (const [key, label] of tabs) {
+      const b = button(label, () => switchTab(key), 'pts-tab' + (key === state.tab ? ' active' : ''));
+      b.dataset.tab = key;
+      tabbar.append(b);
+    }
+    root.append(tabbar);
+    for (const [key] of tabs) {
+      const p = el('div', 'pts-panel' + (key === state.tab ? ' active' : ''));
+      panels[key] = p;
+      root.append(p);
+    }
   }
 
   function switchTab(key) {
+    if (!tabbar) return;
     state.tab = key;
     for (const b of tabbar.children) b.classList.toggle('active', b.dataset.tab === key);
     for (const [k, p] of Object.entries(panels)) p.classList.toggle('active', k === key);
@@ -889,8 +903,10 @@ export function mountUI(root, api) {
 
   function renderAll() {
     renderSubs();
-    renderSearch();
-    renderLogs();
+    if (!wallOnly) {
+      renderSearch();
+      renderLogs();
+    }
   }
 
   async function reloadSubs() {
