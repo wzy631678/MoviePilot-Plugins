@@ -1,5 +1,5 @@
 /* PtSubscriber 插件页面：原生 DOM，无构建工具，宿主注入的 api 负责鉴权。 */
-const UI_VERSION = '1.3.3';
+const UI_VERSION = '1.3.4';
 const CSS = `
 .pts-root,.pts-ov{--acc:#8b5cf6;--acc2:#a78bfa;--sur:#ffffff;--sur2:#f7f7fb;--sur3:#eeeef6;--on:#1f2230;--muted:rgba(31,34,48,.58);--line:rgba(17,24,39,.1);--soft:rgba(139,92,246,.12);--danger:#dc2626;--ok:#16a34a;--warn:#b45309}
 .pts-dark{--sur:#1b1e26;--sur2:#232733;--sur3:#2b3040;--on:#e9ebf2;--muted:rgba(233,235,242,.6);--line:rgba(255,255,255,.12);--soft:rgba(139,92,246,.22);--danger:#f87171;--ok:#4ade80;--warn:#fbbf24}
@@ -142,6 +142,7 @@ const CSS = `
 .pts-grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
 .pts-f{display:flex;flex-direction:column;gap:6px;min-width:0}
 .pts-f>span{font-size:12.2px;color:var(--muted);font-weight:550}
+.pts-f-val{display:inline-flex;align-items:center;align-self:flex-start;font-size:12.8px;font-weight:650;color:var(--acc);background:var(--sur2);border:1px solid var(--line);border-radius:8px;padding:5px 11px}
 .pts-in{width:100%;border:1px solid var(--line);background:var(--sur);color:var(--on);border-radius:10px;padding:9px 12px;font-size:13.4px;outline:none;transition:.15s;font-family:inherit;min-width:0}
 .pts-in:hover{border-color:rgba(139,92,246,.35)}
 .pts-in:focus{border-color:var(--acc);box-shadow:0 0 0 3px rgba(139,92,246,.16)}
@@ -720,6 +721,15 @@ function longDay(text) {
   const s = String(text || '').slice(0, 10);
   if (s.length !== 10 || s[4] !== '-') return s;
   return s.slice(0, 4) + '年' + Number(s.slice(5, 7)) + '月' + Number(s.slice(8, 10)) + '日';
+}
+
+// TM 播出的前一天是周几（YYYY-MM-DD → 'mon'..'sun'）；日期无效返回 ''
+function prevDayWeekday(text) {
+  const s = String(text || '').slice(0, 10);
+  if (s.length !== 10 || s[4] !== '-') return '';
+  const d = new Date(Date.UTC(Number(s.slice(0, 4)), Number(s.slice(5, 7)) - 1, Number(s.slice(8, 10)) - 1));
+  if (isNaN(d.getTime())) return '';
+  return ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'][d.getUTCDay()];
 }
 
 function scheduleText(mode, time, weekday, interval) {
@@ -1659,7 +1669,7 @@ export function mountUI(root, api) {
     const h3 = el('div', 'pts-sec-h');
     h3.append(el('h4', '', '执行时间'));
     sec3.append(h3, el('div', 'pts-sec-desc',
-      '默认按上面的推荐更新日：那集哪天播，当天就去站点找，抢免费种子；也可自己定每天/每周几点'));
+      'TMDB 查出的更新时间就是默认：那集哪天播，到点就去你勾选的站点找资源下载；也可自己定每周几点'));
     // 模式：按 TMDB 推荐时间（默认） / 自定义
     const segMode = segmented([
       { value: 'recommend', label: '按 TMDB 推荐时间' },
@@ -1675,19 +1685,19 @@ export function mountUI(root, api) {
     recModeHint.style.display = 'none';
     sec3.append(recModeHint);
 
-    // 自定义：频率（每天 / 每周指定星期）
-    const seg = segmented([{ value: 'daily', label: '每天' }, { value: 'weekly', label: '每周指定星期' }],
-      (sub && (sub.schedule_mode === 'daily' || sub.schedule_mode === 'weekly'))
-        ? sub.schedule_mode : 'daily', sync);
+    // 自定义：只按「每周指定星期」跑（已去掉「每天」，统一每周固定星期）
     const segRow = el('div', 'pts-f');
     segRow.style.marginBottom = '12px';
-    segRow.append(el('span', '', '频率'), seg.node);
+    segRow.append(el('span', '', '频率'), el('b', 'pts-f-val', '每周指定星期'));
     sec3.append(segRow);
 
     const g3 = el('div', 'pts-grid3');
     const fTime = textInput((sub && sub.schedule_time) || '20:00', 'time');
     const fWeekday = select(WEEKDAYS.map(([v, l]) => ({ value: v, label: l })),
-      (sub && sub.schedule_weekday) || 'mon');
+      (sub && sub.schedule_weekday) || prevDayWeekday((sub && sub.recommend_date) || '') || 'mon');
+    // 只有原本就是「每周指定星期」的订阅才保留自己定的星期；新建/从推荐切过来默认跟「TM 推荐日前一天」
+    let weekdayTouched = !!(sub && sub.schedule_mode === 'weekly' && sub.schedule_weekday);
+    fWeekday.addEventListener('change', () => { weekdayTouched = true; });
     const fInterval = textInput((sub && sub.schedule_interval) || 120, 'number');
     const wrapTime = field('时间', fTime);
     const wrapWeekday = field('星期', fWeekday);
@@ -1754,7 +1764,7 @@ export function mountUI(root, api) {
 
     function sync() {
       const recMode = segMode.get() === 'recommend';
-      const mode = seg.get();               // 自定义频率：daily / weekly
+      const mode = 'weekly';                 // 自定义只按每周指定星期（已去掉「每天」）
       // 推荐模式：只要「每天几点」；频率/星期/间隔都收起来，由推荐更新日驱动
       segRow.style.display = recMode ? 'none' : '';
       wrapTime.style.display = '';
@@ -1787,6 +1797,12 @@ export function mountUI(root, api) {
           + retryText + tail;
       } else {
         recModeHint.style.display = 'none';
+        // 默认星期 = TM 推荐日的前一天；用户自己改过就不动
+        if (!weekdayTouched) {
+          const wd = prevDayWeekday((fRecommend.value || '').trim()
+            || (advance && advance.next_air_date) || (advance && advance.last_air_date) || '');
+          if (wd) fWeekday.value = wd;
+        }
         planHint.textContent = scheduleText(mode, fTime.value, fWeekday.value, fInterval.value)
           + retryText + tail;
       }
@@ -1974,7 +1990,7 @@ export function mountUI(root, api) {
         downloader_id: fDownloader.value,
         qb_category: '',
         save_path: fSavePath.value.trim(),
-        schedule_mode: segMode.get() === 'recommend' ? 'recommend' : seg.get(),
+        schedule_mode: segMode.get() === 'recommend' ? 'recommend' : 'weekly',
         schedule_time: fTime.value || '20:00',
         schedule_weekday: fWeekday.value,
         schedule_interval: Number(fInterval.value) || 120,

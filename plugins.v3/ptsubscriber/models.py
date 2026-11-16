@@ -329,7 +329,7 @@ def schedule_label(sub: dict) -> str:
     """把执行时间翻译成中文，明确「周几几点去勾选站点找资源」。
 
     recommend 模式：不固定星期几几点，按 TMDB 推荐更新日（recommend_date）起每天守候，
-    避免错过免费种子；用户也可在「执行时间」里切回自定义每天/每周。
+    避免错过免费种子；用户也可在「执行时间」里切回自定义每周指定星期。
     """
     mode = sub.get("schedule_mode", "daily")
     time_text = sub.get("schedule_time") or "20:00"
