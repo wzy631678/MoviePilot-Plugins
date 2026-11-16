@@ -309,7 +309,11 @@ class MPBridge:
                 sid = item
             elif isinstance(item, str) and item.strip():
                 key = item.strip().lower()
-                sid = by_domain.get(key)
+                if key.isdigit():
+                    # 纯数字就是 MP 站点 id（MP 订阅里 sites 存的就是 id）
+                    sid = int(key)
+                else:
+                    sid = by_domain.get(key)
                 if not sid:
                     # 站名也可能被直接传进来
                     for s in self.list_sites():

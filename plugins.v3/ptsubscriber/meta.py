@@ -5,7 +5,9 @@
 """
 from __future__ import annotations
 
+import json
 import logging
+from datetime import date
 from typing import Any
 
 logger = logging.getLogger("PtSubscriber")
@@ -337,3 +339,106 @@ def _tv_details(tmdb_id: int, season: int | None) -> dict:
         "is_anim": anim,
         "overview": str(data.get("overview") or ""),
     }
+
+
+# ------------------------------------------------------------ 播出日期 / 媒体库补全
+
+def air_dates(tmdb_id: int, season: int | None = None) -> dict:
+    """读 TMDB 每集的播出日期，算「下一集什么时候更」。
+
+    靠 details(tmdb_id, append_to_response="season/N") 一次请求把该季的
+    episodes（含 air_date / episode_number / name）带回来，不多发请求。
+    season 没指定就取季号最大的一季（用户追的通常是当前季）。
+
+    返回：
+        {
+          "last_ep": 20, "last_air_date": "2026-11-14",   # 已播的最后一集
+          "next_ep": 21, "next_air_date": "2026-11-21",   # 还没播的下一集（推荐更新时间）
+          "eps": [{"ep": 1, "air_date": "2026-11-01", "name": "..."}, ...],
+        }
+    读不到或已完结时对应字段为空 / None，绝不影响订阅本身。
+    """
+    try:
+        from app.modules.themoviedb.tmdbv3api import TV
+
+        tv = TV()
+        detail = tv.details(int(tmdb_id)) or {}
+        seasons = clean_seasons(detail.get("seasons"))
+        if not seasons:
+            return {}
+        target = int(season) if season else seasons[-1]["season"]
+        season_data = tv.details(int(tmdb_id), append_to_response=f"season/{target}") or {}
+        rows = (season_data.get(f"season/{target}") or {}).get("episodes") or []
+    except Exception as exc:
+        logger.warning(f"[PtSubscriber] TMDB 播出日期失败：{type(exc).__name__}: {str(exc)[:120]}")
+        return {}
+    eps: list[dict] = []
+    for row in rows or []:
+        try:
+            num = int(row.get("episode_number") or 0)
+        except (TypeError, ValueError):
+            continue
+        aired = str(row.get("air_date") or "").strip()
+        if num >= 1 and aired:
+            eps.append({"ep": num, "air_date": aired,
+                        "name": str(row.get("name") or "")[:40]})
+    eps.sort(key=lambda x: x["ep"])
+    if not eps:
+        return {}
+    today = date.today().isoformat()
+    last = next_ = None
+    for item in eps:
+        if item["air_date"] <= today:
+            last = item
+        elif next_ is None:
+            next_ = item
+    return {
+        "last_ep": last["ep"] if last else None,
+        "last_air_date": last["air_date"] if last else "",
+        "next_ep": next_["ep"] if next_ else None,
+        "next_air_date": next_["air_date"] if next_ else "",
+        # 只回最近 40 集，够看下一段时间的更新节奏
+        "eps": eps[-40:],
+    }
+
+
+def library_eps(tmdb_id: int, season: int | None = None) -> list[int]:
+    """查 MoviePilot 媒体库（MediaServerItem 表）里已入库的集数。
+
+    用户要求「订阅好了可以读取媒体库有没有下载好入库了的补全其它」——
+    已入库的集数直接视为已下过，订阅只补缺失的。查不到就返回空，不影响订阅。
+    """
+    try:
+        from app.db import get_db
+        from app.db import models as M
+        from sqlalchemy import or_
+
+        db = next(get_db())
+        rows = db.query(M.MediaServerItem).filter(
+            or_(M.MediaServerItem.media_source == "themoviedb",
+                M.MediaServerItem.media_source == "tmdb"),
+            M.MediaServerItem.media_id == str(int(tmdb_id))).all()
+    except Exception as exc:
+        logger.debug(f"[PtSubscriber] 媒体库读取失败：{type(exc).__name__}: {str(exc)[:120]}")
+        return []
+    eps: set[int] = set()
+    for row in rows or []:
+        info = getattr(row, "seasoninfo", None) or {}
+        if isinstance(info, str):
+            try:
+                info = json.loads(info)
+            except Exception:
+                info = {}
+        if not isinstance(info, dict):
+            continue
+        for season_key, ep_list in info.items():
+            if season and str(season_key) != str(int(season)):
+                continue
+            for raw in ep_list or []:
+                try:
+                    num = int(raw)
+                except (TypeError, ValueError):
+                    continue
+                if num >= 1:
+                    eps.add(num)
+    return sorted(eps)

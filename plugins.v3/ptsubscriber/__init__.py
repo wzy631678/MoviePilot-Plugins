@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import json
 import re
 import threading
 import time
@@ -27,6 +28,8 @@ from .meta import poster_url as meta_poster_url
 from .meta import resolve as resolve_meta
 from .meta import search as search_meta
 from .meta import search_fast as search_meta_fast
+from .meta import air_dates as meta_air_dates
+from .meta import library_eps as meta_library_eps
 from .models import next_episode, resolution_of, schedule_label, search_keyword
 from .mp_adapter import MPBridge
 from .rules import RULE_OPTIONS, parse_rules
@@ -169,7 +172,7 @@ def _name_tier(core: str, title: str) -> int:
 class PtSubscriber(_PluginBase):
     plugin_name = "定时订阅下载"
     plugin_desc = "自己选周几几点，到指定站点搜资源并按详细规则下载到指定容器；自动对接 TMDB，按片名、年份、剧集/电影、集数逐项比对，只把真正这部排在最前。聊天入口不用打斜杠，一条说全最省事：「订阅 天下第一 观众 1080P 周一5:30」（片名/站点/清晰度/周期顺序随意）；也可以只发「订阅 天才女友」先列同名作品，回序号后再选「从第几集 / 哪些站 / 多久刷一次」，回「确定」立刻补搜并把能下的资源列出来让你挑；「查资源 仙逆 馒头 1080P」只搜一轮直接下，不建订阅。斜杠命令 /ptsub、/ptfind、/ptlist 一样可用；回复全是纯文本不带图。"
-    plugin_version = "1.9.5"
+    plugin_version = "1.9.9"
     plugin_author = "wzy"
     plugin_config_prefix = "ptsubscriber_"
     plugin_order = 90
@@ -366,6 +369,10 @@ class PtSubscriber(_PluginBase):
             {"path": "/probe", "endpoint": self.api_probe, "methods": ["GET"], "summary": "自检"},
             {"path": "/meta/refresh", "endpoint": self.api_meta_refresh, "methods": ["POST"], "summary": "同步海报与总集数"},
             {"path": "/meta/search", "endpoint": self.api_meta_search, "methods": ["GET"], "summary": "按名字查 TMDB 候选"},
+            {"path": "/meta/advance", "endpoint": self.api_meta_advance, "methods": ["GET"], "summary": "TMDB 下一集播出日期与媒体库已入库集数"},
+            {"path": "/mp/subs", "endpoint": self.api_mp_subs, "methods": ["GET"], "summary": "列出 MoviePilot 自带订阅，供导入"},
+            {"path": "/mp/import", "endpoint": self.api_mp_import, "methods": ["POST"], "summary": "把 MP 自带订阅导入本插件（可同时删除 MP 里的）"},
+            {"path": "/mp/delete", "endpoint": self.api_mp_delete, "methods": ["POST"], "summary": "删除 MoviePilot 自带的订阅"},
             {"path": "/notify/test", "endpoint": self.api_notify_test, "methods": ["POST"], "summary": "发送测试通知"},
             {"path": "/downloaders/test", "endpoint": self.api_downloader_test, "methods": ["GET"], "summary": "测试下载器连接"},
             {"path": "/sub", "endpoint": self.api_sub_save, "methods": ["POST"], "summary": "新增或修改订阅"},
@@ -774,6 +781,30 @@ class PtSubscriber(_PluginBase):
         return {"ok": True, "items": items,
                 "message": "" if items else "TMDB 没找到同名作品，可以直接保存，之后在卡片上点「同步海报」再试"}
 
+    def api_meta_advance(self, tmdb_id: int = 0, season: int | None = None) -> dict:
+        """新建订阅的「下一步」信息：TMDB 下一集播出日期（推荐更新时间）+ 媒体库已入库集数。
+
+        前端选中 TMDB 作品后调它一次，就能同时把「推荐哪天更新」和
+        「媒体库里已经入库了哪几集」拿到手，补全其它集数用。
+        """
+        if not tmdb_id:
+            return {"ok": True, "next_ep": None, "next_air_date": "",
+                    "last_ep": None, "last_air_date": "", "eps": [], "library_eps": []}
+        try:
+            air = meta_air_dates(int(tmdb_id), season)
+        except Exception as exc:
+            logger.warning(f"[{self.plugin_name}] TMDB 播出日期失败：{type(exc).__name__}: {exc}")
+            air = {}
+        try:
+            lib = meta_library_eps(int(tmdb_id), season)
+        except Exception as exc:
+            logger.warning(f"[{self.plugin_name}] 媒体库读取失败：{type(exc).__name__}: {exc}")
+            lib = []
+        return {"ok": True,
+                "next_ep": air.get("next_ep"), "next_air_date": air.get("next_air_date") or "",
+                "last_ep": air.get("last_ep"), "last_air_date": air.get("last_air_date") or "",
+                "eps": air.get("eps") or [], "library_eps": lib}
+
     def api_meta_refresh(self, payload: dict = Body(default={})) -> dict:
         """给所有订阅补/刷新 TMDB 海报与总集数；force=True 时连已有的也重查。"""
         force = bool((payload or {}).get("force"))
@@ -793,12 +824,313 @@ class PtSubscriber(_PluginBase):
         return {"ok": True, "updated": updated, "failed": failed,
                 "message": f"已更新 {updated} 条海报" + tail}
 
+    # -------------------------------------------------- MP 自带订阅（导入 / 删除）
+    # 用户原话：「mp 里面订阅了的弄一个可以复制到插件里面的，然后删除 mp 里面订阅的，这样方便点」。
+    # 只做三件事：读 MP 的 subscribe 表 → 映射成本插件订阅落库 → 可选顺手删掉 MP 那条。
+    _MP_KINDS = {"电影": "movie", "电视剧": "series"}
+    _MP_STATES = {"R": "订阅中", "P": "待定", "S": "已暂停"}
+
+    @staticmethod
+    def _mp_site_ids(value: Any) -> list[int]:
+        """MP 订阅的 sites 可能是 [34]、["34"] 或 '[34]' 字符串，统一成 int 列表。"""
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (TypeError, ValueError):
+                value = [x for x in re.split(r"[,;\s]+", value) if x.strip()]
+        out: list[int] = []
+        for item in value or []:
+            try:
+                num = int(str(item).strip())
+            except (TypeError, ValueError):
+                continue
+            if num > 0 and num not in out:
+                out.append(num)
+        return out
+
+    @staticmethod
+    def _mp_words(value: Any) -> str:
+        """MP 的 include / exclude 是正则（如 (?=.*HHWEB)），只取字母数字词做包含匹配。"""
+        words = [w for w in re.split(r"[^0-9A-Za-z\u4e00-\u9fff]+", str(value or ""))
+                 if len(w) >= 2]
+        return " ".join(dict.fromkeys(words))
+
+    @staticmethod
+    def _mp_rules(quality: Any, resolution: Any) -> dict:
+        """MP 的画质正则翻译成本插件的多选规则：认得几个算几个，认不出就留空。"""
+        text = f"{resolution or ''} {quality or ''}".lower()
+        rules: dict[str, Any] = {}
+        res = [v for v, keys in (("4k", ("2160", "4k", "uhd")), ("1080p", ("1080",)),
+                                 ("720p", ("720",)), ("480p", ("480",)))
+               if any(k in text for k in keys)]
+        src = [v for v, keys in (("remux", ("remux",)),
+                                 ("webdl", ("web-?dl", "webdl", "web-?rip", "webrip")),
+                                 ("bluray", ("bluray", "blu-?ray", "bdrip")),
+                                 ("hdtv", ("hdtv",)), ("dvd", ("dvd",)))
+               if any(k in text for k in keys)]
+        if res:
+            rules["resolutions"] = res
+        if src:
+            rules["sources"] = src
+        return rules
+
+    def _mp_rows(self) -> list[Any]:
+        """读 MP 自带订阅（subscribe 表）。
+
+        优先直查库：`Subscribe.get_by_state` 就是 select 全表，不按用户过滤，
+        结果最确定；官方 Oper 需要启动组合根配好事务执行器，读不到时再退回它。
+        """
+        try:
+            from app.db import get_db
+            from app.db import models as M
+
+            db = next(get_db())
+            return list(db.query(M.Subscribe).all())
+        except Exception as exc:  # noqa: BLE001 - 老版本/表名不同再试 Oper
+            logger.debug(f"[{self.plugin_name}] 直查 MP 订阅失败，改走 Oper：{type(exc).__name__}: {exc}")
+        from app.db.oper.subscribe import SubscribeOper
+
+        return list(SubscribeOper().list() or [])
+
+    def _mp_site_map(self) -> dict[int, dict]:
+        try:
+            return {int(s["sid"]): s for s in self.bridge.list_sites() if s.get("sid")}
+        except Exception:
+            return {}
+
+    def _mp_imported_map(self) -> dict[str, str]:
+        """插件里已订阅的 TMDB ID → 插件订阅 id，用来给导入列表标「已导入」。"""
+        out: dict[str, str] = {}
+        for sub in self.store.subs():
+            tid = str(sub.get("tmdb_id") or "")
+            if tid:
+                out[tid] = str(sub.get("id") or "")
+        return out
+
+    def _mp_item(self, row: Any, site_map: dict[int, dict],
+                 imported: dict[str, str]) -> dict:
+        """把一条 MP 订阅翻成前端能显示的扁平字典。"""
+        def val(name: str, default: Any = "") -> Any:
+            got = getattr(row, name, None)
+            return default if got is None else got
+
+        kind = self._MP_KINDS.get(str(val("type")), "series")
+        tmdb_id = 0
+        if str(val("media_source")).lower() in ("themoviedb", "tmdb"):
+            try:
+                tmdb_id = int(val("media_id", 0))
+            except (TypeError, ValueError):
+                tmdb_id = 0
+        domains: list[str] = []
+        names: list[str] = []
+        for sid in self._mp_site_ids(val("sites", None)):
+            site = site_map.get(sid) or {}
+            domains.append(str(site.get("domain") or site.get("name") or sid))
+            names.append(str(site.get("name") or site.get("domain") or sid))
+        try:
+            season = int(val("season", 0) or 0)
+        except (TypeError, ValueError):
+            season = 0
+        state = str(val("state")).upper()
+        try:
+            total = int(val("total_episode", 0) or 0)
+        except (TypeError, ValueError):
+            total = 0
+        try:
+            start = int(val("start_episode", 0) or 0)
+        except (TypeError, ValueError):
+            start = 0
+        try:
+            lack = int(val("lack_episode", 0) or 0)
+        except (TypeError, ValueError):
+            lack = 0
+        return {
+            "id": int(val("id", 0) or 0),
+            "name": str(val("name")).strip(),
+            "year": str(val("year")),
+            "kind": kind,
+            "season": (season or 1) if kind == "series" else None,
+            "tmdb_id": tmdb_id,
+            "total_episode": total,
+            "start_episode": start,
+            "lack_episode": lack,
+            "state": state,
+            "state_text": self._MP_STATES.get(state, state or "未知"),
+            "enabled": state == "R",
+            "site_ids": domains,
+            "site_names": names,
+            "quality": str(val("quality")),
+            "resolution": str(val("resolution")),
+            "include": str(val("include")),
+            "exclude": str(val("exclude")),
+            "downloader": str(val("downloader")),
+            "save_path": str(val("save_path")),
+            "poster": str(val("poster")),
+            "imported_id": imported.get(str(tmdb_id), "") if tmdb_id else "",
+        }
+
+    def api_mp_subs(self) -> dict:
+        """列出 MP 自带订阅，标出插件里是否已经导入过（按 TMDB ID 判重）。"""
+        try:
+            rows = self._mp_rows()
+        except Exception as exc:
+            return {"ok": False, "items": [],
+                    "message": f"读取 MP 订阅失败：{type(exc).__name__}: {str(exc)[:160]}"}
+        site_map = self._mp_site_map()
+        imported = self._mp_imported_map()
+        items: list[dict] = []
+        for row in rows:
+            try:
+                items.append(self._mp_item(row, site_map, imported))
+            except Exception as exc:  # noqa: BLE001 - 单条脏数据不影响整表
+                logger.debug(f"[{self.plugin_name}] 解析 MP 订阅失败：{type(exc).__name__}: {exc}")
+        items.sort(key=lambda x: x["id"])
+        return {"ok": True, "items": items,
+                "message": "" if items else "MP 里没有订阅任务，不需要导入"}
+
+    def api_mp_import(self, payload: dict = Body(default={})) -> dict:
+        """把勾选的 MP 订阅复制成插件订阅；remove=True 时顺手删掉 MP 那条。"""
+        data = payload or {}
+        ids: list[int] = []
+        for raw in data.get("ids") or []:
+            try:
+                num = int(str(raw).strip())
+            except (TypeError, ValueError):
+                continue
+            if num > 0 and num not in ids:
+                ids.append(num)
+        if not ids:
+            return {"ok": False, "message": "请先勾选要导入的 MP 订阅"}
+        remove = bool(data.get("remove"))
+        with_library = data.get("with_library") is not False
+        try:
+            rows = {int(getattr(r, "id", 0) or 0): r for r in self._mp_rows()}
+        except Exception as exc:
+            return {"ok": False,
+                    "message": f"读取 MP 订阅失败：{type(exc).__name__}: {str(exc)[:160]}"}
+        site_map = self._mp_site_map()
+        imported, removed = 0, 0
+        notes: list[str] = []
+        for sid in ids:
+            row = rows.get(sid)
+            if row is None:
+                notes.append(f"#{sid} MP 里已经没有了")
+                continue
+            try:
+                item = self._mp_item(row, site_map, {})
+            except Exception as exc:
+                notes.append(f"#{sid} 解析失败：{type(exc).__name__}")
+                continue
+            if not item["name"]:
+                notes.append(f"#{sid} 没有名字，跳过")
+                continue
+            body = {
+                "name": item["name"],
+                "kind": item["kind"],
+                "season": item["season"],
+                "site_ids": item["site_ids"],
+                # MP 的 start_episode 是「接下来要补的集」，语义和本插件的 ep_start 一致
+                "ep_start": item["start_episode"] or 1,
+                "ep_end": item["total_episode"] or None,
+                "include_words": self._mp_words(item["include"]),
+                "exclude_words": self._mp_words(item["exclude"]),
+                "rules": self._mp_rules(item["quality"], item["resolution"]),
+                "downloader_id": item["downloader"] or "",
+                "save_path": item["save_path"] or "",
+                "notify": True,
+                "enabled": bool(item["enabled"]),
+            }
+            try:
+                sub = self.store.upsert_sub(body)
+            except Exception as exc:
+                notes.append(f"{item['name']} 落库失败：{str(exc)[:60]}")
+                continue
+            # 媒体库已入库的集并进台账，导入后只补其它集，不重下一遍
+            if with_library and item["tmdb_id"]:
+                try:
+                    done = meta_library_eps(int(item["tmdb_id"]), item["season"])
+                    if done:
+                        self.store.mark_delivered(str(sub.get("id") or ""), done)
+                except Exception as exc:  # noqa: BLE001 - 媒体库读不到不影响导入
+                    logger.debug(f"[{self.plugin_name}] 导入时读媒体库失败：{type(exc).__name__}: {exc}")
+            try:
+                self._fill_meta(self.store.get_sub(str(sub.get("id") or "")) or sub,
+                                int(item["tmdb_id"]) or None)
+            except Exception:
+                pass
+            imported += 1
+            if remove and not self._mp_delete_one(sid):
+                notes.append(f"{item['name']} 已导入，但 MP 那条没删掉")
+            elif remove:
+                removed += 1
+        self._rebuild_jobs()
+        head = f"已导入 {imported} 条订阅"
+        if remove:
+            head += f"，并从 MP 删除 {removed} 条"
+        if notes:
+            head += "；" + "、".join(notes[:5])
+        return {"ok": imported > 0, "imported": imported, "removed": removed,
+                "notes": notes, "message": head if imported else (head or "没有可导入的订阅")}
+
+    def _mp_delete_one(self, sid: int) -> bool:
+        """删 MP 那一条订阅：优先走官方 Oper（会维护缓存与一致性），失败再直删。"""
+        try:
+            from app.db.oper.subscribe import SubscribeOper
+
+            SubscribeOper().delete(int(sid))
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[{self.plugin_name}] SubscribeOper 删除失败，改直删：{type(exc).__name__}: {exc}")
+        try:
+            from app.db import get_db
+            from app.db import models as M
+
+            db = next(get_db())
+            hit = db.query(M.Subscribe).filter(M.Subscribe.id == int(sid)).delete()
+            db.commit()
+            return bool(hit)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[{self.plugin_name}] 删除 MP 订阅 {sid} 失败：{type(exc).__name__}: {exc}")
+            return False
+
+    def api_mp_delete(self, payload: dict = Body(default={})) -> dict:
+        """只删 MP 里的订阅（不动插件）。"""
+        ids: list[int] = []
+        for raw in (payload or {}).get("ids") or []:
+            try:
+                num = int(str(raw).strip())
+            except (TypeError, ValueError):
+                continue
+            if num > 0 and num not in ids:
+                ids.append(num)
+        if not ids:
+            return {"ok": False, "message": "没有指定要删除的 MP 订阅", "removed": 0}
+        done: list[int] = []
+        failed: list[int] = []
+        for sid in ids:
+            ok = self._mp_delete_one(sid)
+            (done if ok else failed).append(sid)
+        text = f"已从 MP 删除 {len(done)} 条" if done else "删除失败"
+        if failed:
+            text += f"，{len(failed)} 条没删掉（#{'、#'.join(map(str, failed[:5]))}）"
+        return {"ok": bool(done), "removed": len(done), "failed": failed,
+                "message": text}
+
     def api_sub_save(self, payload: dict = Body(default={})) -> dict:
         try:
             payload = payload or {}
             wanted_id = payload.get("tmdb_id")
+            # 媒体库补全：前端带上「媒体库已入库集数」，并入台账，订阅只补缺失的
+            library_eps = payload.pop("library_eps", None)
             old = self.store.get_sub(str(payload.get("id") or ""))
             sub = self.store.upsert_sub(payload)
+            if library_eps:
+                try:
+                    eps = [int(x) for x in library_eps if str(x).strip().isdigit()]
+                    if eps:
+                        sub = self.store.mark_delivered(str(sub.get("id") or ""), eps) or sub
+                except (TypeError, ValueError):
+                    pass
             if wanted_id:
                 # 用户点选过候选：按 TMDB ID 取，避免同名再认错
                 sub = self._fill_meta(sub, int(wanted_id))

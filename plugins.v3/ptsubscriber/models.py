@@ -41,6 +41,17 @@ class SubscriptionIn(BaseModel):
     # 每轮有结果时推送到 MP 通知（QQ / 微信 / TG 等，取决于 MP 里的通知配置）
     notify: bool = True
     enabled: bool = False
+    # 推荐更新时间：默认取 TMDB 下一集播出日期（真实时间），用户可在表单里自己改。
+    # 只作参考展示，不强制驱动调度——用户说「这个是推荐时间真实时间让我可以自己选择」。
+    recommend_date: str = ""
+
+    @field_validator("recommend_date")
+    @classmethod
+    def valid_recommend(cls, v: str) -> str:
+        v = (v or "").strip()
+        if v and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
+            raise ValueError("推荐更新时间格式必须为 YYYY-MM-DD")
+        return v
 
     @field_validator("name", "include_words", "exclude_words", "qb_category", "downloader_id")
     @classmethod

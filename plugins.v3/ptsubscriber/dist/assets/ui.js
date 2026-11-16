@@ -1,5 +1,5 @@
 /* PtSubscriber 插件页面：原生 DOM，无构建工具，宿主注入的 api 负责鉴权。 */
-const UI_VERSION = '1.2.5';
+const UI_VERSION = '1.2.8';
 const CSS = `
 .pts-root,.pts-ov{--acc:#8b5cf6;--acc2:#a78bfa;--sur:#ffffff;--sur2:#f7f7fb;--sur3:#eeeef6;--on:#1f2230;--muted:rgba(31,34,48,.58);--line:rgba(17,24,39,.1);--soft:rgba(139,92,246,.12);--danger:#dc2626;--ok:#16a34a;--warn:#b45309}
 .pts-dark{--sur:#1b1e26;--sur2:#232733;--sur3:#2b3040;--on:#e9ebf2;--muted:rgba(233,235,242,.6);--line:rgba(255,255,255,.12);--soft:rgba(139,92,246,.22);--danger:#f87171;--ok:#4ade80;--warn:#fbbf24}
@@ -163,6 +163,25 @@ const CSS = `
 .pts-err{color:var(--danger);font-size:13.2px;font-weight:650;margin:0 0 10px;white-space:pre-wrap;display:none}
 .pts-err.on{display:block;animation:ptsShake .4s ease}
 .pts-err.on::before{content:'⚠ '}
+/* 提示条：日期校验 / 导入说明。默认是橙色警告，.ok 绿色确认，.tip 灰色中性说明 */
+.pts-warn{font-size:11.8px;line-height:1.6;border-radius:9px;padding:8px 11px;margin-top:8px;color:var(--warn);background:rgba(180,83,9,.1);border:1px solid rgba(180,83,9,.32)}
+.pts-warn::before{content:'⚠ '}
+.pts-warn.ok{color:var(--ok);background:rgba(22,163,74,.09);border-color:rgba(22,163,74,.3)}
+.pts-warn.ok::before{content:'✓ '}
+.pts-warn.tip{color:var(--muted);background:var(--sur2);border-color:var(--line)}
+.pts-warn.tip::before{content:'· '}
+.pts-mp-list{max-height:min(50vh,440px);overflow:auto;border:1px solid var(--line);border-radius:12px;padding:2px 12px;background:var(--sur)}
+.pts-mp-row{display:flex;gap:10px;align-items:flex-start;padding:10px 2px;border-bottom:1px solid var(--line);cursor:pointer}
+.pts-mp-row:last-child{border-bottom:0}
+.pts-mp-row.off{cursor:default;opacity:.62}
+.pts-mp-row input{accent-color:var(--acc);margin:3px 0 0;flex:none}
+.pts-mp-main{flex:1;min-width:0}
+.pts-mp-name{font-size:13px;font-weight:650;line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pts-mp-meta{font-size:11.6px;color:var(--muted);line-height:1.65;margin-top:2px}
+.pts-mp-badge{font-size:10.6px;font-weight:700;padding:1px 7px;border-radius:20px;border:1px solid var(--line);color:var(--muted);flex:none;white-space:nowrap;margin-top:2px}
+.pts-mp-badge.on{color:var(--acc);border-color:rgba(139,92,246,.45);background:var(--soft)}
+.pts-mp-foot{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:12px 20px;border-top:1px solid var(--line);flex:none}
+.pts-mp-foot .pts-spacer{flex:1;min-width:8px}
 @keyframes ptsShake{0%,100%{transform:translateX(0)}25%{transform:translateX(-5px)}75%{transform:translateX(5px)}}
 .pts-picker.flash{outline:2px solid var(--danger);outline-offset:2px;border-radius:12px}
 .pts-table{width:100%;border-collapse:separate;border-spacing:0;font-size:12.4px}
@@ -228,6 +247,7 @@ const ICONS = {
   save: '<path d="M5 4.5h10.5L19 8v11.5H5V4.5Z"/><path d="M8.5 4.5v5h6v-5M8.5 19.5v-5.5h7v5.5"/>',
   rewind: '<path d="M4 10a8 8 0 1 1 2 8.5"/><path d="M4 4.5V10h5.5"/>',
   bell: '<path d="M6 9.5a6 6 0 1 1 12 0c0 4.6 1.6 5.8 2.2 6.4H3.8c.6-.6 2.2-1.8 2.2-6.4Z"/><path d="M9.8 19a2.2 2.2 0 0 0 4.4 0"/>',
+  importIn: '<path d="M12 3.5v9.5M8.2 9.2 12 13l3.8-3.8"/><path d="M4.5 15v4.5h15V15"/>',
 };
 
 function el(tag, cls, text) {
@@ -647,6 +667,26 @@ function numOrNull(node) {
   return v === '' ? null : Number(v);
 }
 
+/* 日期差（天）：dayDiff('2026-11-21','2026-11-22') === 1。
+   只按 UTC 算术，避免本地时区把日期算偏一天。 */
+function dayDiff(from, to) {
+  const ms = (text) => {
+    const p = String(text || '').slice(0, 10).split('-');
+    if (p.length !== 3) return NaN;
+    return Date.UTC(Number(p[0]), (Number(p[1]) || 1) - 1, Number(p[2]) || 1);
+  };
+  const a = ms(from);
+  const b = ms(to);
+  if (!isFinite(a) || !isFinite(b)) return 0;
+  return Math.round((b - a) / 86400000);
+}
+
+// 2026-11-21 → 11/21，卡片和提示里短一点好读
+function shortDay(text) {
+  const s = String(text || '').slice(0, 10);
+  return s.length === 10 ? s.slice(5).replace('-', '/') : s;
+}
+
 function scheduleText(mode, time, weekday, interval) {
   if (mode === 'interval') return `每隔 ${Number(interval) || 120} 分钟到站点搜一次`;
   const t = time || '03:00';
@@ -823,6 +863,202 @@ export function mountUI(root, api) {
     renderLogs();
   }
 
+  // ---------------------------------------------------------- 从 MP 导入订阅
+  /* 把 MoviePilot 自带的订阅复制成本插件任务。
+     用户原话：「mp 里面订阅了的弄一个可以复制到插件里面的，然后删除 mp 里面订阅的，这样方便点」。
+     流程：读 MP subscribe 表 → 勾选 → 导入（可同时删掉 MP 那条）。 */
+  async function openMpImport() {
+    if (activeOverlay) activeOverlay.remove();
+    const ov = el('div', 'pts-ov' + (root.classList.contains('pts-dark') ? ' pts-dark' : ''));
+    const box = el('div', 'pts-form');
+    box.style.width = 'min(780px,100%)';
+
+    const head = el('div', 'pts-form-head');
+    const mid = el('div', 'mid');
+    mid.append(el('div', 'pts-form-title', '从 MoviePilot 导入订阅'),
+      el('div', 'pts-form-sub',
+        '把 MP 里已订阅的复制成这里的任务；可以顺手删掉 MP 那条，避免两边各下一遍'));
+    const btnClose = el('button', 'pts-icon-btn');
+    btnClose.type = 'button';
+    btnClose.append(iconEl('close', 16));
+    head.append(mid, btnClose);
+
+    const body = el('div');
+    body.style.padding = '14px 18px';
+    body.style.overflow = 'auto';
+    body.style.flex = '0 1 auto';   // 贴着内容收紧，不要在底部留一大片空白
+    const foot = el('div', 'pts-mp-foot');
+    box.append(head, body, foot);
+
+    let items = [];
+    let rows = [];
+    let tglRemove = null;
+    let tglLib = null;
+
+    function close() {
+      document.removeEventListener('keydown', onKey);
+      ov.remove();
+      if (activeOverlay === ov) activeOverlay = null;
+    }
+    function onKey(e) { if (e.key === 'Escape') close(); }
+
+    ov.append(box);
+    ov.addEventListener('click', (e) => { if (e.target === ov) close(); });
+    btnClose.addEventListener('click', close);
+    document.addEventListener('keydown', onKey);
+    activeOverlay = ov;
+    document.body.append(ov);
+
+    const tip = el('div', 'pts-warn tip', '正在读取 MP 订阅…');
+    body.append(tip);
+
+    function picked() {
+      return rows.filter((r) => r.cb.checked && !r.cb.disabled).map((r) => r.it.id);
+    }
+
+    async function load() {
+      try {
+        const r = await call('GET', 'mp/subs');
+        if (!r.ok) {
+          tip.className = 'pts-warn';
+          tip.textContent = r.message || '读取 MP 订阅失败';
+          return;
+        }
+        items = r.items || [];
+        renderList();
+      } catch (e) {
+        tip.className = 'pts-warn';
+        tip.textContent = '读取 MP 订阅失败：' + String(e && e.message ? e.message : e);
+      }
+    }
+
+    function renderList() {
+      body.innerHTML = '';
+      foot.innerHTML = '';
+      rows = [];
+      if (!items.length) {
+        const empty = el('div', 'pts-warn tip');
+        empty.textContent = 'MP 里没有订阅任务，不用导入';
+        body.append(empty);
+        return;
+      }
+
+      const bar = el('div', 'pts-bar');
+      bar.style.margin = '0 0 10px';
+      const selAll = button('全选可导入的', () => {
+        for (const row of rows) if (!row.cb.disabled) row.cb.checked = true;
+        countSel();
+      }, '');
+      const countEl = el('span', 'pts-muted', '');
+      const refresh = button('重新读取', () => { load(); }, 'ghost');
+      refresh.prepend(iconEl('refresh', 14));
+      bar.append(selAll, refresh, countEl);
+      body.append(bar);
+
+      const list = el('div', 'pts-mp-list');
+      for (const it of items) {
+        const row = el('label', 'pts-mp-row' + (it.imported_id ? ' off' : ''));
+        const cb = el('input');
+        cb.type = 'checkbox';
+        cb.checked = !it.imported_id;
+        cb.disabled = !!it.imported_id;
+        if (it.imported_id) cb.title = '插件里已经有这部（TMDB ID 相同），不用重复导入';
+        const main = el('div', 'pts-mp-main');
+        main.append(el('div', 'pts-mp-name', it.name || '(没有名字)'));
+        const bits = [];
+        if (it.year) bits.push(it.year);
+        if (it.kind === 'movie') bits.push('电影');
+        else if (it.season && it.season > 1) bits.push('第 ' + it.season + ' 部');
+        else bits.push('剧集');
+        if (it.total_episode) bits.push('共 ' + it.total_episode + ' 集');
+        if (it.start_episode) bits.push('MP 从第 ' + it.start_episode + ' 集补');
+        if (it.lack_episode) bits.push('还差 ' + it.lack_episode + ' 集');
+        bits.push(it.state_text || '状态未知');
+        main.append(el('div', 'pts-mp-meta', bits.join(' · ')));
+        const line2 = [];
+        line2.push((it.site_names || []).length
+          ? '站点：' + it.site_names.join('、')
+          : '站点：MP 里没设，导入后自己勾一下');
+        const rr = [it.resolution, it.quality].filter(Boolean).join(' · ');
+        if (rr) line2.push('MP 原规则 ' + rr);
+        main.append(el('div', 'pts-mp-meta', line2.join('　')));
+        const badge = el('span', 'pts-mp-badge' + (it.imported_id ? ' on' : ''),
+          it.imported_id ? '插件里已有' : '可导入');
+        row.append(cb, main, badge);
+        cb.addEventListener('change', countSel);
+        rows.push({ cb, it });
+        list.append(row);
+      }
+      body.append(list);
+
+      tglRemove = toggle('导入后删除 MP 里这条', true, null);
+      tglRemove.node.title = '勾上后导入成功即从 MP 删除，避免插件和 MP 各下一遍';
+      tglLib = toggle('跳过媒体库已入库的集', true, null);
+      tglLib.node.title = '读媒体库，把已入库的集记进台账，导入后只补其它集';
+      const btnImport = button('导入选中', () => doImport(), 'primary');
+      btnImport.prepend(iconEl('importIn', 15));
+      const btnDel = button('只删 MP 里的', () => doDelete(), 'danger');
+      btnDel.title = '不导入，只把 MP 里勾选的订阅删掉';
+      foot.append(tglRemove.node, tglLib.node, el('span', 'pts-spacer'), btnImport, btnDel);
+      countSel();
+
+      function countSel() {
+        const n = picked().length;
+        const dup = items.filter((it) => it.imported_id).length;
+        countEl.textContent = `共 ${items.length} 条 · 已选 ${n} 条`
+          + (dup ? ` · ${dup} 条插件里已有` : '');
+        btnImport.disabled = n === 0;
+        btnDel.disabled = n === 0;
+      }
+    }
+
+    async function doImport() {
+      const ids = picked();
+      if (!ids.length) return;
+      const btn = foot.querySelector('.pts-btn.primary');
+      const old = btn ? btn.textContent : '';
+      if (btn) { btn.disabled = true; btn.textContent = '导入中…'; }
+      try {
+        const r = await call('POST', 'mp/import', {
+          ids,
+          remove: tglRemove ? tglRemove.get() : true,
+          with_library: tglLib ? tglLib.get() : true,
+        });
+        await reloadSubs();
+        alert(r.message || (r.ok ? '导入完成' : '导入失败'));
+        if (r.ok) { close(); switchTab('subs'); return; }
+      } catch (e) {
+        alert('导入失败：' + String(e && e.message ? e.message : e));
+      }
+      if (btn) { btn.disabled = false; btn.textContent = old; }
+    }
+
+    async function doDelete() {
+      const ids = picked();
+      if (!ids.length) return;
+      const names = items.filter((it) => ids.indexOf(it.id) >= 0).map((it) => it.name);
+      if (!confirm(`确定从 MP 删除这 ${ids.length} 条订阅？\n\n${names.slice(0, 6).join('、')}`
+        + (names.length > 6 ? ' 等' : '') + '\n\n删除后 MP 不再自动追这些剧；已经下好的文件不受影响。')) {
+        return;
+      }
+      const btn = foot.querySelector('.pts-btn.danger');
+      const old = btn ? btn.textContent : '';
+      if (btn) { btn.disabled = true; btn.textContent = '删除中…'; }
+      try {
+        const r = await call('POST', 'mp/delete', { ids });
+        alert(r.message || (r.ok ? '已删除' : '删除失败'));
+        const bad = r.failed || [];
+        items = items.filter((it) => ids.indexOf(it.id) < 0 || bad.indexOf(it.id) >= 0);
+        renderList();
+      } catch (e) {
+        alert('删除失败：' + String(e && e.message ? e.message : e));
+        if (btn) { btn.disabled = false; btn.textContent = old; }
+      }
+    }
+
+    await load();
+  }
+
   // -------------------------------------------------------------- 订阅列表
   function renderSubs() {
     const p = panels.subs;
@@ -850,10 +1086,18 @@ export function mountUI(root, api) {
       ico.append(iconEl('film', 28));
       empty.append(ico, el('h3', '', '还没有订阅任务'),
         el('p', '', '创建任务后可以为每个订阅分别设置站点、资源规则、下载容器和执行时间，'
-          + '到点自动去勾选站点寻找资源。'),
-        button('创建第一个任务', () => openForm(null), 'primary'));
-      const first = empty.querySelector('.pts-btn');
-      first.prepend(iconEl('plus', 15));
+          + '到点自动去勾选站点寻找资源。'));
+      const emptyBar = el('div', 'pts-bar');
+      emptyBar.style.justifyContent = 'center';
+      emptyBar.style.marginTop = '10px';
+      const createFirst = button('创建第一个任务', () => openForm(null), 'primary');
+      createFirst.prepend(iconEl('plus', 15));
+      // MP 里已有订阅时，直接搬过来最省事
+      const importFirst = button('从 MP 导入已有订阅', () => openMpImport(), '');
+      importFirst.prepend(iconEl('importIn', 15));
+      importFirst.title = '读取 MoviePilot 自带的订阅，一键复制成插件任务，并可同时删除 MP 里那条';
+      emptyBar.append(createFirst, importFirst);
+      empty.append(emptyBar);
       p.append(empty);
       return;
     }
@@ -877,7 +1121,11 @@ export function mountUI(root, api) {
       }
     }, '');
     syncMeta.title = '按剧名到 TMDB 查海报、年份和总集数；已有海报的会跳过';
-    bar.append(add, syncMeta, el('span', 'pts-muted',
+    // 从 MP 导入：MP 里已订阅的复制过来（可顺手删掉 MP 那条），省得两边各填一遍
+    const importMp = button('从 MP 导入', () => openMpImport(), '');
+    importMp.prepend(iconEl('importIn', 15));
+    importMp.title = '读取 MoviePilot 自带的订阅，一键复制成插件任务，并可同时删除 MP 里那条';
+    bar.append(add, importMp, syncMeta, el('span', 'pts-muted',
       `${state.subs.length} 个任务 · 站点 ${probe.site_count ?? (state.options.sites || []).length} 个`
       + ` · 下载器 ${(state.options.downloaders || []).length} 个`
       + ` · 调度器${probe.scheduler_running ? '运行中' : '未运行'}`));
@@ -1005,6 +1253,12 @@ export function mountUI(root, api) {
     if (sub.year) meta.append(el('span', 'pts-year', sub.year));
     if (sub.kind === 'movie') meta.append(el('span', 'pts-sbadge', '电影'));
     else if (sub.season) meta.append(el('span', 'pts-sbadge', 'S' + String(sub.season).padStart(2, '0')));
+    // 推荐更新日：一眼看到「哪天该去站点看看有没有出种」
+    if (sub.recommend_date) {
+      const recBadge = el('span', 'pts-sbadge', shortDay(sub.recommend_date) + ' 更');
+      recBadge.title = '推荐更新日 ' + sub.recommend_date + '：这天多半会出种，方便盯免费期';
+      meta.append(recBadge);
+    }
     if (!sub.enabled) meta.append(el('span', 'pts-sbadge off', '已停用'));
     if (meta.childNodes.length) top.append(meta);
     wrap.append(top);
@@ -1100,6 +1354,18 @@ export function mountUI(root, api) {
     const g1b = el('div', 'pts-grid2');
     g1b.style.marginTop = '12px';
     g1b.append(field('订阅集数 · 从', fEpStart), field('到', fEpEnd));
+    // ---- 推荐更新日：默认取 TMDB 下一集播出日期（真实时间），用户可自己改 ----
+    const fRecommend = textInput(sub ? sub.recommend_date : '', 'date');
+    const recommendWrap = field('推荐更新日', fRecommend,
+      'TMDB 下一集播出日期，可改；到点提醒你补这集');
+    recommendWrap.style.marginTop = '12px';
+    // ⑥ 日期校验提示：选得比 TMDB 真实播出日还晚时报警（错过免费种子最常见的原因）
+    const recWarn = el('div', 'pts-warn');
+    recWarn.style.display = 'none';
+    // 上次自动填的值：用户手改过就不覆盖，避免抢输入
+    let autoEnd = null;         // 自动填进「到」的总集数
+    let autoRecommend = '';     // 自动填进推荐日的日期
+    let advance = { next_ep: null, next_air_date: '', library_eps: [] };  // /meta/advance 结果
     // ---- TMDB 候选：填名字实时查，同名作品让用户点选，避免认错 ----
     const metaPicker = createMetaPicker({
       request: call,
@@ -1117,15 +1383,48 @@ export function mountUI(root, api) {
           segKind.set(m.kind);
           applyKind();
         }
+        // ① 自动读取总集数：TMDB 给了就填到「到」（用户没手填过才覆盖，避免抢输入）
+        if (m && m.total_eps > 0) {
+          const cur = numOrNull(fEpEnd);
+          if (!cur || cur === autoEnd) {
+            fEpEnd.value = m.total_eps;
+            autoEnd = m.total_eps;
+          }
+        } else if (m) {
+          autoEnd = null;
+        }
+        // ② 读 TMDB 下一集播出日期（推荐时间）+ 媒体库已入库集数（补全用）
+        loadAdvance(m);
         sync();
       },
     });
-    sec1.append(g1, metaPicker.node, g1b);
+    // 选中 TMDB 作品后：一次拿「推荐哪天更新」+「媒体库已入库哪几集」
+    async function loadAdvance(m) {
+      advance = { next_ep: null, next_air_date: '', library_eps: [] };
+      if (!m || !m.tmdb_id || m.kind === 'movie') { sync(); return; }
+      try {
+        const season = numOrNull(fSeason);
+        const r = await call('GET', 'meta/advance?tmdb_id=' + encodeURIComponent(m.tmdb_id)
+          + (season ? '&season=' + season : ''));
+        if (r && r.ok) advance = r;
+      } catch (e) { /* 拿不到就保持空，不影响订阅 */ }
+      if (advance.next_air_date) {
+        const cur = fRecommend.value;
+        if (!cur || cur === autoRecommend) {
+          fRecommend.value = advance.next_air_date;
+          autoRecommend = advance.next_air_date;
+        }
+      }
+      sync();
+    }
+    sec1.append(g1, metaPicker.node, g1b, recommendWrap, recWarn);
     // 电影没有季/集概念，选了电影就把这两行收起来
     function applyKind() {
       const movie = segKind.get() === 'movie';
       seasonField.style.display = movie ? 'none' : '';
       g1b.style.display = movie ? 'none' : '';
+      recommendWrap.style.display = movie ? 'none' : '';
+      recWarn.style.display = 'none';
     }
     applyKind();
 
@@ -1241,11 +1540,12 @@ export function mountUI(root, api) {
     const sum = {};
     for (const [key, label] of [['name', '任务名'], ['sites', '站点'], ['tmdb', 'TMDB 作品'],
       ['downloader', '下载器'], ['target', '保存到'], ['rules', '资源规则'], ['plan', '执行计划'],
-      ['eps', '集数'], ['notify', '通知'], ['status', '状态']]) {
+      ['eps', '集数'], ['recommend', '推荐更新'], ['notify', '通知'], ['status', '状态']]) {
       const row = el('div', 'pts-sum-row');
       row.append(el('span', '', label), el('b', '', '—'));
       sum[key] = row.querySelector('b');
       if (key === 'tmdb') sum.tmdbRow = row;
+      if (key === 'recommend') sum.recommendRow = row;
       aside.append(row);
     }
     const sumHint = el('div', 'pts-hint');
@@ -1266,7 +1566,7 @@ export function mountUI(root, api) {
     }
     function escClose(e) { if (e.key === 'Escape') closeForm(); }
 
-    const syncBound = [fName, fSeason, fEpStart, fEpEnd, fSavePath,
+    const syncBound = [fName, fSeason, fEpStart, fEpEnd, fRecommend, fSavePath,
       fSubtitle, fPromotion, fHdr, fMinSize, fMaxSize, fSeeders, fTime, fInterval,
       fRetry, fWindow, fDownloader, fWeekday];
     for (const node of syncBound) {
@@ -1336,6 +1636,52 @@ export function mountUI(root, api) {
           + ((meta.season_count || 0) > 1 ? ` · ${meta.season_count} 季` : ''));
       }
       sum.eps.textContent = parts.length ? parts.join(' · ') : '不限';
+      // 媒体库已有几集入库：保存时会自动跳过，只补其它集
+      const lib = (advance && advance.library_eps) || [];
+      sum.eps.title = lib.length
+        ? '媒体库已有 ' + lib.length + ' 集入库，保存时自动跳过、只补其它集'
+        : '';
+      // 推荐更新日：显示「11/21 · 第 21 集」，日期用户可改
+      const rec = fRecommend.value.trim();
+      if (rec) {
+        const day = rec.length >= 10 ? rec.slice(5).replace('-', '/') : rec;
+        const epText = advance && advance.next_ep ? `第 ${advance.next_ep} 集` : '';
+        sum.recommend.textContent = [day, epText].filter(Boolean).join(' · ')
+          + (lib.length ? ` · 库已有 ${lib.length} 集` : '');
+        sum.recommend.className = '';
+        if (sum.recommendRow) {
+          sum.recommendRow.title = advance && advance.next_air_date
+            ? 'TMDB 显示这一集 ' + advance.next_air_date + ' 播出；推荐时间，可在左侧改'
+            : '推荐更新时间，可自己改';
+        }
+      } else {
+        sum.recommend.textContent = '未设置';
+        sum.recommend.className = 'warn';
+      }
+      // ⑥ 推荐时间选错提醒：TMDB 说 11/21 就播了，用户却选了 11/22，当场提醒
+      let wText = '';
+      let wCls = 'pts-warn';
+      const nextAir = (advance && advance.next_air_date) || '';
+      const nextEp = advance && advance.next_ep;
+      if (rec && nextAir && segKind.get() !== 'movie') {
+        const late = dayDiff(nextAir, rec);
+        const epName = nextEp ? `第 ${nextEp} 集` : '下一集';
+        if (late > 0) {
+          wText = `TMDB 上${epName} ${shortDay(nextAir)} 就播了，你选的是 ${shortDay(rec)}，晚了 ${late} 天。`
+            + '免费种子大多播出当天就出，晚一天既抢不到免费、又多等一天——'
+            + `建议改成 ${nextAir}。`;
+        } else if (late < 0) {
+          wCls = 'pts-warn tip';
+          wText = `${epName}要 ${shortDay(nextAir)} 才播，选 ${shortDay(rec)} 到时候站点还没资源，`
+            + '等它更新那天再搜更省事。';
+        } else {
+          wCls = 'pts-warn ok';
+          wText = `和 TMDB 播出日一致（${shortDay(nextAir)}），当天就能补这一集。`;
+        }
+      }
+      recWarn.className = wCls;
+      recWarn.style.display = wText ? '' : 'none';
+      recWarn.textContent = wText;
       sum.notify.textContent = tglNotify.get() ? '下到资源后推送到 MP 通知' : '不推送';
       sum.status.textContent = tglEnabled.get() ? '保存后立即启用' : '保存为停用';
     }
@@ -1376,6 +1722,21 @@ export function mountUI(root, api) {
 
     async function save(thenRun) {
       err.classList.remove('on');
+      // ⑥ 保存前再拦一次：推荐日比 TMDB 播出日还晚，说明多半是手滑选错，
+      //    直接问要不要改成真实播出日（用户原话：怕错过免费种子和观影时间）。
+      const airDate = (advance && advance.next_air_date) || '';
+      const recDate = fRecommend.value.trim();
+      if (airDate && recDate && segKind.get() !== 'movie') {
+        const late = dayDiff(airDate, recDate);
+        if (late > 0) {
+          const epName = advance && advance.next_ep ? `第 ${advance.next_ep} 集` : '下一集';
+          const fix = confirm(`提醒：TMDB 上${epName} ${airDate} 就播出了，`
+            + `你选的推荐更新日是 ${recDate}（晚 ${late} 天）。\n\n`
+            + '免费种子大多播出当天就出，晚一天很可能就错过免费期。\n\n'
+            + `点「确定」按 ${airDate} 保存；点「取消」回表单自己改。`);
+          if (fix) fRecommend.value = airDate;
+        }
+      }
       const payload = {
         id: sub ? sub.id : '',
         name: fName.value.trim(),
@@ -1400,6 +1761,9 @@ export function mountUI(root, api) {
         retry_window: Number(fWindow.value) || 0,
         notify: tglNotify.get(),
         enabled: tglEnabled.get(),
+        // 推荐更新日（用户可改）+ 媒体库已入库集数（保存时并入台账，订阅只补缺失的）
+        recommend_date: fRecommend.value.trim(),
+        library_eps: (advance && advance.library_eps) || [],
       };
       // 校验失败要让用户一定看见：滚动到错误条并抖动；站点没勾时把站点框标红
       const showErr = (msg, target) => {
