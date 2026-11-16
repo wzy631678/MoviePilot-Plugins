@@ -1,5 +1,5 @@
 /* PtSubscriber 插件页面：原生 DOM，无构建工具，宿主注入的 api 负责鉴权。 */
-const UI_VERSION = '1.3.2';
+const UI_VERSION = '1.3.3';
 const CSS = `
 .pts-root,.pts-ov{--acc:#8b5cf6;--acc2:#a78bfa;--sur:#ffffff;--sur2:#f7f7fb;--sur3:#eeeef6;--on:#1f2230;--muted:rgba(31,34,48,.58);--line:rgba(17,24,39,.1);--soft:rgba(139,92,246,.12);--danger:#dc2626;--ok:#16a34a;--warn:#b45309}
 .pts-dark{--sur:#1b1e26;--sur2:#232733;--sur3:#2b3040;--on:#e9ebf2;--muted:rgba(233,235,242,.6);--line:rgba(255,255,255,.12);--soft:rgba(139,92,246,.22);--danger:#f87171;--ok:#4ade80;--warn:#fbbf24}
@@ -63,16 +63,17 @@ const CSS = `
 .pts-year{font-weight:700;color:rgba(255,255,255,.84);font-variant-numeric:tabular-nums;flex:none}
 .pts-sbadge{font-size:10.4px;font-weight:750;color:#fff;background:rgba(255,255,255,.2);border-radius:5px;padding:1px 5px;flex:none;letter-spacing:.3px;backdrop-filter:blur(3px)}
 .pts-sbadge.off{background:rgba(255,255,255,.14);color:rgba(255,255,255,.78)}
-.pts-pbody{display:flex;align-items:center;gap:8px;padding:9px 11px 10px;font-size:12.2px;color:var(--muted)}
+.pts-pbody{display:flex;align-items:center;gap:8px;padding:9px 11px 10px;font-size:12px;color:var(--muted)}
+.pts-pbody>span:last-child{white-space:nowrap;flex:none}
 .pts-pbar{position:absolute;left:0;right:0;bottom:0;height:2.5px;background:rgba(139,92,246,.13)}
 .pts-pbar>span{display:block;height:100%;background:linear-gradient(90deg,var(--acc),var(--acc2))}
 .pts-prog{display:inline-flex;align-items:center;gap:4px;font-weight:700;color:var(--on);font-variant-numeric:tabular-nums}
 .pts-prog .pts-ico{opacity:.7}
 .pts-pbody .sp{flex:1}
-/* 卡片第二行：订阅区间 + 媒体库现有集数（小一号，别抢主数字的视线） */
-.pts-psub{display:flex;align-items:center;gap:6px;padding:0 11px 9px;font-size:11px;color:var(--muted);line-height:1.45;font-variant-numeric:tabular-nums}
+/* 卡片第二行：订阅区间 + 还差几集（小一号，窄卡可换行，别抢主数字的视线） */
+.pts-psub{display:flex;align-items:center;gap:6px;padding:0 11px 9px;font-size:10.8px;color:var(--muted);line-height:1.55;font-variant-numeric:tabular-nums;flex-wrap:wrap}
 .pts-psub .sp{flex:1}
-.pts-psub>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pts-psub>span{min-width:0}
 .pts-kebab{width:25px;height:25px;border-radius:7px;border:0;background:transparent;color:var(--muted);cursor:pointer;display:grid;place-items:center;flex:none;padding:0}
 .pts-kebab:hover{background:var(--soft);color:var(--acc)}
 .pts-kebab.on-poster{position:absolute;top:7px;right:7px;width:27px;height:27px;background:rgba(10,12,18,.46);color:#fff;backdrop-filter:blur(4px);opacity:.5;transition:.16s}
@@ -225,15 +226,16 @@ const CSS = `
 .pts-badge.mid{background:rgba(245,158,11,.16);color:var(--warn)}
 .pts-meta{display:flex;gap:10px;flex-wrap:wrap;font-size:11.6px;color:var(--muted);margin-top:6px}
 .pts-dot{width:4px;height:4px;border-radius:50%;background:currentColor;opacity:.5;display:inline-block;margin:0 2px}
-/* 窄屏按可用宽度降列：4 → 3 → 2，宁可变少也不让卡片被截掉一半 */
-@media (max-width:1180px){
+/* 窄屏按可用宽度降列：5 一直留到 860px（笔记本半屏也还是 5 个），再窄才降 4/3/2，
+   宁可变少也不让卡片被截掉一半 */
+@media (max-width:860px){
   .pts-tasks{grid-template-columns:repeat(4,minmax(0,1fr))}
 }
-@media (max-width:980px){
+@media (max-width:700px){
   .pts-tasks{grid-template-columns:repeat(3,minmax(0,1fr))}
-  .pts-epgrid{grid-template-columns:repeat(4,minmax(0,1fr))}
+  .pts-epgrid{grid-template-columns:repeat(3,minmax(0,1fr))}
 }
-@media (max-width:680px){
+@media (max-width:520px){
   .pts-tasks{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
   .pts-epgrid{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
@@ -1344,7 +1346,6 @@ export function mountUI(root, api) {
       prog.append(el('b', '', done ? '已下载' : '电影'));
     } else if (scTotal) {
       prog.append(el('b', '', '已下 ' + scDone + ' 集'));
-      if (scLeft) prog.append(el('span', 'pts-muted', ' · 还差 ' + scLeft + ' 集'));
     } else {
       prog.append(el('b', '', done || lib ? '已下 ' + (done || lib) + ' 集' : '待补搜'));
     }
@@ -1371,12 +1372,14 @@ export function mountUI(root, api) {
     bodyEl.append(when);
     card.append(bodyEl);
 
-    // 第二行小字：订阅区间（第几集到第几集、一共多少集）+ 媒体库现在有几集。
+    // 第二行小字：订阅区间 + 一共几集 + 还差几集（+ 媒体库现在有几集）。
     // 用户说过「外面的数字要和里面填的对得上」，所以区间直接摊开写，不缩成 3/36。
     if (sub.kind !== 'movie' && scTotal) {
       bodyEl.style.paddingBottom = '3px';
       const info = el('div', 'pts-psub');
-      info.append(el('span', '', `订阅第 ${scStart}~${scEnd} 集 · 共 ${scTotal} 集`));
+      const left = `订阅第 ${scStart}~${scEnd} 集 · 共 ${scTotal} 集`
+        + (scLeft ? ` · 缺 ${scLeft} 集` : '');
+      info.append(el('span', '', left));
       if (lib && lib !== scDone) info.append(el('span', 'sp'), el('span', '', `媒体库 ${lib} 集`));
       info.title = `订阅第 ${scStart}~${scEnd} 集，共 ${scTotal} 集；已下 ${scDone} 集，还差 ${scLeft} 集`
         + (lib !== scDone ? `；媒体库现有 ${lib} 集` : '')
