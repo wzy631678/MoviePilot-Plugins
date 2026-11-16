@@ -117,7 +117,7 @@ def build_trigger(sub: dict, tz: str):
     from apscheduler.triggers.cron import CronTrigger
     from apscheduler.triggers.interval import IntervalTrigger
 
-    mode = sub.get("schedule_mode", "daily")
+    mode = sub.get("schedule_mode", "recommend")
     if mode == "interval":
         return IntervalTrigger(minutes=max(5, int(sub.get("schedule_interval") or 120)), timezone=tz)
     hour, minute = (int(x) for x in str(sub.get("schedule_time") or "20:00").split(":"))
@@ -204,7 +204,7 @@ def _name_tier(core: str, title: str) -> int:
 class PtSubscriber(_PluginBase):
     plugin_name = "定时订阅下载"
     plugin_desc = "默认按 TMDB 推荐更新时间自动到指定站点搜资源（也可自选每天/每周指定星期几点），按详细规则下载到指定容器；自动对接 TMDB，按片名、年份、剧集/电影、集数逐项比对，只把真正这部排在最前，并把每集播出日列成表；读媒体库只补没入库的集，已下过的（含删掉的）不重下。聊天入口不用打斜杠，一条说全最省事：「订阅 天下第一 观众 1080P 周一5:30」（片名/站点/清晰度/周期顺序随意）；也可以只发「订阅 天才女友」先列同名作品，回序号后再选「从第几集 / 哪些站 / 多久刷一次」，回「确定」立刻补搜并把能下的资源列出来让你挑；「查资源 仙逆 馒头 1080P」只搜一轮直接下，不建订阅。斜杠命令 /ptsub、/ptfind、/ptlist 一样可用；回复全是纯文本不带图。"
-    plugin_version = "1.10.4"
+    plugin_version = "1.10.5"
     plugin_author = "wzy"
     plugin_config_prefix = "ptsubscriber_"
     plugin_order = 90
@@ -239,6 +239,13 @@ class PtSubscriber(_PluginBase):
                 logger.info(f"[{self.plugin_name}] {fixed} 条订阅的默认执行时间由 03:00 改为 20:00")
         except Exception as exc:  # noqa: BLE001 - 迁移失败不影响启动
             logger.debug(f"[{self.plugin_name}] 执行时间迁移跳过：{type(exc).__name__}: {exc}")
+        # 「每天」是老默认值，现在默认是「按 TMDB 推荐时间」，顺手把老订阅搬过去
+        try:
+            moved = self.store.migrate_daily_to_recommend()
+            if moved:
+                logger.info(f"[{self.plugin_name}] {moved} 条订阅的执行模式改为「按 TMDB 推荐时间」")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[{self.plugin_name}] 执行模式迁移跳过：{type(exc).__name__}: {exc}")
         # 智能体工具靠模块级引用拿插件实例；重载后指向新实例
         try:
             remote.plugin_ref = self
@@ -802,6 +809,17 @@ class PtSubscriber(_PluginBase):
             return {"ok": False, "message": f"{type(exc).__name__}: {str(exc)[:200]}"}
 
     def api_subs(self) -> dict:
+        # 打开列表时顺手做一次「每天 → 按 TMDB 推荐时间」的搬家：老订阅不用等重启，
+        # 下次进表单默认就落在推荐模式上。只在本进程第一次调用时跑，之后不再动数据。
+        if not getattr(self, "_mode_migrated", False):
+            self._mode_migrated = True
+            try:
+                moved = self.store.migrate_daily_to_recommend()
+                if moved:
+                    logger.info(f"[{self.plugin_name}] {moved} 条订阅的执行模式改为「按 TMDB 推荐时间」")
+                    self._rebuild_jobs()
+            except Exception as exc:  # noqa: BLE001 - 迁移失败不能影响列表加载
+                logger.debug(f"[{self.plugin_name}] 执行模式迁移失败：{type(exc).__name__}: {exc}")
         # 老订阅升级上来还没跟媒体库对齐过（library_eps 空），或还没查过播出状态（air_state 空）：
         # 顺手补一次推荐更新日 + 媒体库集数。每次请求最多补 2 条，避免列表接口被 TMDB
         # 查询拖慢；补过一次就置位（查不到也记 unknown），不会每次打开页面都重查。

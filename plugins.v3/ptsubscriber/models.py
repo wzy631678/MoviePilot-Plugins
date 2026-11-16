@@ -33,6 +33,7 @@ class SubscriptionIn(BaseModel):
     qb_category: str = ""
     save_path: str = ""
     # recommend = 按 TMDB 推荐时间（recommend_date 那天起每天守候，不手动定星期几几点）
+    # daily 是早期默认值，v1.10.5 起启动时自动搬成 recommend，保留字面量只为兼容老数据
     schedule_mode: Literal["recommend", "daily", "weekly", "interval"] = "recommend"
     # 默认晚上 20:00：TMDB 的推荐更新日只有「哪天」，真正出种多在当晚 19 点以后，
     # 凌晨 3 点去搜往往比首播晚了半天，免费种子的窗口已经过了。
@@ -331,7 +332,7 @@ def schedule_label(sub: dict) -> str:
     recommend 模式：不固定星期几几点，按 TMDB 推荐更新日（recommend_date）起每天守候，
     避免错过免费种子；用户也可在「执行时间」里切回自定义每周指定星期。
     """
-    mode = sub.get("schedule_mode", "daily")
+    mode = sub.get("schedule_mode", "recommend")
     time_text = sub.get("schedule_time") or "20:00"
     retry = int(sub.get("retry_interval") or 0)
     window = int(sub.get("retry_window") or 0)

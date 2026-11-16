@@ -1,5 +1,5 @@
 /* PtSubscriber 插件页面：原生 DOM，无构建工具，宿主注入的 api 负责鉴权。 */
-const UI_VERSION = '1.3.4';
+const UI_VERSION = '1.3.5';
 const CSS = `
 .pts-root,.pts-ov{--acc:#8b5cf6;--acc2:#a78bfa;--sur:#ffffff;--sur2:#f7f7fb;--sur3:#eeeef6;--on:#1f2230;--muted:rgba(31,34,48,.58);--line:rgba(17,24,39,.1);--soft:rgba(139,92,246,.12);--danger:#dc2626;--ok:#16a34a;--warn:#b45309}
 .pts-dark{--sur:#1b1e26;--sur2:#232733;--sur3:#2b3040;--on:#e9ebf2;--muted:rgba(233,235,242,.6);--line:rgba(255,255,255,.12);--soft:rgba(139,92,246,.22);--danger:#f87171;--ok:#4ade80;--warn:#fbbf24}
@@ -1671,10 +1671,12 @@ export function mountUI(root, api) {
     sec3.append(h3, el('div', 'pts-sec-desc',
       'TMDB 查出的更新时间就是默认：那集哪天播，到点就去你勾选的站点找资源下载；也可自己定每周几点'));
     // 模式：按 TMDB 推荐时间（默认） / 自定义
+    // 默认就是「按 TMDB 推荐时间」：只有用户自己选了每周固定星期 / 按间隔，才落到自定义
     const segMode = segmented([
       { value: 'recommend', label: '按 TMDB 推荐时间' },
       { value: 'custom', label: '自定义' },
-    ], (sub && sub.schedule_mode && sub.schedule_mode !== 'recommend') ? 'custom' : 'recommend', sync);
+    ], (sub && (sub.schedule_mode === 'weekly' || sub.schedule_mode === 'interval')) ? 'custom' : 'recommend',
+      sync);
     const modeRow = el('div', 'pts-f');
     modeRow.style.marginBottom = '12px';
     modeRow.append(el('span', '', '模式'), segMode.node);

@@ -182,6 +182,26 @@ class Store:
             self.save_subs(items)
         return changed
 
+    def migrate_daily_to_recommend(self) -> int:
+        """把早期默认的「每天」执行模式换成「按 TMDB 推荐时间」。
+
+        v1.10.4 起表单里已经没有「每天」这个选项，「按 TMDB 推荐时间」才是默认：
+        那集哪天播，就从那天起每天到点去站点找。老订阅留着 daily，打开表单会落到
+        「自定义」页签，用户看不到 TMDB 推荐时间，所以这里统一搬过去。
+        只改 daily / 空值；weekly、interval 是用户自己挑的，一律不动。
+        """
+        items = self.subs()
+        changed = 0
+        for sub in items:
+            mode = str(sub.get("schedule_mode") or "").strip()
+            if mode in ("", "daily"):
+                sub["schedule_mode"] = "recommend"
+                sub["updated_at"] = _now()
+                changed += 1
+        if changed:
+            self.save_subs(items)
+        return changed
+
     def set_sub_fields(self, sid: str, **fields) -> dict | None:
         """给一条订阅就地补几个字段（媒体库缓存 / 推荐更新日等）。"""
         items = self.subs()
