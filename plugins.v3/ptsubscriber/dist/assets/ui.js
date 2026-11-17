@@ -1,7 +1,7 @@
 /* PtSubscriber 插件页面：原生 DOM，无构建工具，宿主注入的 api 负责鉴权。 */
-const UI_VERSION = '1.3.6';
+const UI_VERSION = '1.3.8';
 const CSS = `
-.pts-root,.pts-ov{--acc:#8b5cf6;--acc2:#a78bfa;--sur:#ffffff;--sur2:#f7f7fb;--sur3:#eeeef6;--on:#1f2230;--muted:rgba(31,34,48,.58);--line:rgba(17,24,39,.1);--soft:rgba(139,92,246,.12);--danger:#dc2626;--ok:#16a34a;--warn:#b45309}
+.pts-root,.pts-ov,.pts-libpop{--acc:#8b5cf6;--acc2:#a78bfa;--sur:#ffffff;--sur2:#f7f7fb;--sur3:#eeeef6;--on:#1f2230;--muted:rgba(31,34,48,.58);--line:rgba(17,24,39,.1);--soft:rgba(139,92,246,.12);--danger:#dc2626;--ok:#16a34a;--warn:#b45309}
 .pts-dark{--sur:#1b1e26;--sur2:#232733;--sur3:#2b3040;--on:#e9ebf2;--muted:rgba(233,235,242,.6);--line:rgba(255,255,255,.12);--soft:rgba(139,92,246,.22);--danger:#f87171;--ok:#4ade80;--warn:#fbbf24}
 .pts-root{font-size:14px;line-height:1.55;color:var(--on);padding:2px 2px 28px;color-scheme:light}
 .pts-root.pts-dark{color-scheme:dark}
@@ -74,6 +74,15 @@ const CSS = `
 .pts-psub{display:flex;align-items:center;gap:6px;padding:0 11px 9px;font-size:10.8px;color:var(--muted);line-height:1.55;font-variant-numeric:tabular-nums;flex-wrap:wrap}
 .pts-psub .sp{flex:1}
 .pts-psub>span{min-width:0}
+/* 媒体库集数标签：只显示「X 集」容易和已下集数看混，悬停/点击弹出具体是哪些集 */
+.pts-libtag{position:relative;flex:none;color:var(--acc);cursor:help;font-weight:600;border-bottom:1px dashed rgba(139,92,246,.55);padding-bottom:1px;user-select:none;transition:color .15s}
+.pts-libtag:hover{color:var(--acc2)}
+.pts-libtag.pin{color:var(--acc2)}
+.pts-libpop{position:fixed;left:0;top:0;z-index:2000;min-width:96px;max-width:240px;box-sizing:border-box;background:var(--sur);border:1px solid var(--line);border-radius:9px;box-shadow:0 12px 30px rgba(17,24,39,.25);padding:8px 10px;display:none;text-align:left;font-weight:400;font-size:12px;line-height:1.5;color:var(--on)}
+.pts-libpop.show{display:block}
+.pts-libpop-head{font-size:10.5px;font-weight:750;color:var(--acc);margin-bottom:3px;letter-spacing:.2px}
+.pts-libpop-list{font-size:11px;color:var(--on);line-height:1.7;word-break:normal;overflow-wrap:break-word;max-height:120px;overflow:auto}
+.pts-libpop-foot{font-size:10px;color:var(--muted);margin-top:4px}
 .pts-kebab{width:25px;height:25px;border-radius:7px;border:0;background:transparent;color:var(--muted);cursor:pointer;display:grid;place-items:center;flex:none;padding:0}
 .pts-kebab:hover{background:var(--soft);color:var(--acc)}
 .pts-kebab.on-poster{position:absolute;top:7px;right:7px;width:27px;height:27px;background:rgba(10,12,18,.46);color:#fff;backdrop-filter:blur(4px);opacity:.5;transition:.16s}
@@ -1122,6 +1131,7 @@ export function mountUI(root, api, opts) {
 
   // -------------------------------------------------------------- 订阅列表
   function renderSubs() {
+    closeLibPop();
     const p = panels.subs;
     p.innerHTML = '';
     if (!state.options) {
@@ -1318,6 +1328,72 @@ export function mountUI(root, api, opts) {
     return btn;
   }
 
+  // 媒体库集数标签：卡片第二行右侧的「媒体库 X 集」。
+  // 悬停立即展开具体是哪几集；点击可钉住，方便移开鼠标慢慢看；再点或点别处收起。
+  // 浮层是挂在 body 上的单例（fixed 定位），不遮本卡文字、也不被卡片 overflow 裁掉。
+  // 老订阅还没同步过媒体库时 library_eps 是「下到过的集」的回退值，标题里写清楚。
+  let libPop = null, libPopTag = null, libPinned = false, libDocOff = null;
+  function ensureLibPop() {
+    if (libPop && libPop.parentNode) return libPop;
+    libPop = el('div', 'pts-libpop' + (root.classList.contains('pts-dark') ? ' pts-dark' : ''));
+    libPop.append(el('div', 'pts-libpop-head'), el('div', 'pts-libpop-list'), el('div', 'pts-libpop-foot'));
+    document.body.appendChild(libPop);
+    window.addEventListener('scroll', placeLibPop, true);
+    window.addEventListener('resize', placeLibPop);
+    return libPop;
+  }
+  function placeLibPop() {
+    if (!libPop || !libPopTag || !libPop.classList.contains('show')) return;
+    const tr = libPopTag.getBoundingClientRect();
+    const pr = libPop.getBoundingClientRect();
+    let left = tr.right - pr.width;                        // 右对齐标签
+    left = Math.max(8, Math.min(left, window.innerWidth - pr.width - 8));
+    let top = tr.bottom + 8;                               // 默认落在标签下方
+    if (top + pr.height > window.innerHeight - 8) top = tr.top - pr.height - 8; // 下方放不下就翻到上方
+    top = Math.max(8, top);
+    libPop.style.left = Math.round(left) + 'px';
+    libPop.style.top = Math.round(top) + 'px';
+  }
+  function openLibPop(tag, eps, n) {
+    ensureLibPop();
+    libPopTag = tag;
+    libPop.children[0].textContent = '媒体库已入库集数';
+    libPop.children[1].textContent = eps.join('、');
+    libPop.children[2].textContent = '共 ' + n + ' 集';
+    libPop.classList.add('show');
+    placeLibPop();
+  }
+  function closeLibPop() {
+    if (libPop) libPop.classList.remove('show');
+    libPinned = false;
+    libPopTag = null;
+    if (libDocOff) { document.removeEventListener('click', libDocOff); libDocOff = null; }
+  }
+  function libTag(sub) {
+    const eps = Array.isArray(sub.library_eps)
+      ? sub.library_eps.slice().sort((a, b) => a - b) : [];
+    const n = Number(sub.lib_count) || eps.length || 0;
+    if (!n) return null;
+    const tag = el('span', 'pts-libtag', '媒体库 ' + n + ' 集');
+    if (!eps.length) {
+      tag.title = '媒体库已入库 ' + n + ' 集';
+      return tag;
+    }
+    tag.addEventListener('mouseenter', () => { if (!libPinned || libPopTag === tag) openLibPop(tag, eps, n); });
+    tag.addEventListener('mouseleave', () => { if (!libPinned) closeLibPop(); });
+    tag.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (libPinned && libPopTag === tag) { closeLibPop(); return; }
+      libPinned = true;
+      openLibPop(tag, eps, n);
+      if (!libDocOff) {
+        libDocOff = () => closeLibPop();
+        document.addEventListener('click', libDocOff);
+      }
+    });
+    return tag;
+  }
+
   function taskCard(sub) {
     const card = el('div', 'pts-pcard' + (sub.enabled ? '' : ' off') + (sub.poster_url ? '' : ' noposter'));
 
@@ -1406,10 +1482,10 @@ export function mountUI(root, api, opts) {
       const left = `订阅第 ${scStart}~${scEnd} 集 · 共 ${scTotal} 集`
         + (scLeft ? ` · 缺 ${scLeft} 集` : '');
       info.append(el('span', '', left));
-      if (lib && lib !== scDone) info.append(el('span', 'sp'), el('span', '', `媒体库 ${lib} 集`));
+      const libEl = libTag(sub);
+      if (libEl) info.append(el('span', 'sp'), libEl);
       info.title = `订阅第 ${scStart}~${scEnd} 集，共 ${scTotal} 集；已下 ${scDone} 集，还差 ${scLeft} 集`
-        + (lib !== scDone ? `；媒体库现有 ${lib} 集` : '')
-        + '。已下过的集（包括看完删掉的）不会重复下载。';
+        + '。已下过的集（包括看完删掉的）不会重复下载；右侧「媒体库」悬停可看具体集数。';
       card.append(info);
     }
 
