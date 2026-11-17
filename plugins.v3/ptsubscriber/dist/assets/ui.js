@@ -1,5 +1,5 @@
 /* PtSubscriber 插件页面：原生 DOM，无构建工具，宿主注入的 api 负责鉴权。 */
-const UI_VERSION = '1.3.8';
+const UI_VERSION = '1.3.9';
 const CSS = `
 .pts-root,.pts-ov,.pts-libpop{--acc:#8b5cf6;--acc2:#a78bfa;--sur:#ffffff;--sur2:#f7f7fb;--sur3:#eeeef6;--on:#1f2230;--muted:rgba(31,34,48,.58);--line:rgba(17,24,39,.1);--soft:rgba(139,92,246,.12);--danger:#dc2626;--ok:#16a34a;--warn:#b45309}
 .pts-dark{--sur:#1b1e26;--sur2:#232733;--sur3:#2b3040;--on:#e9ebf2;--muted:rgba(233,235,242,.6);--line:rgba(255,255,255,.12);--soft:rgba(139,92,246,.22);--danger:#f87171;--ok:#4ade80;--warn:#fbbf24}
@@ -74,7 +74,7 @@ const CSS = `
 .pts-psub{display:flex;align-items:center;gap:6px;padding:0 11px 9px;font-size:10.8px;color:var(--muted);line-height:1.55;font-variant-numeric:tabular-nums;flex-wrap:wrap}
 .pts-psub .sp{flex:1}
 .pts-psub>span{min-width:0}
-/* 媒体库集数标签：只显示「X 集」容易和已下集数看混，悬停/点击弹出具体是哪些集 */
+/* 媒体库集数标签：卡上写「已入库 X 集」，只显示数字容易和已下集数看混，悬停/点击弹出具体是哪些集 */
 .pts-libtag{position:relative;flex:none;color:var(--acc);cursor:help;font-weight:600;border-bottom:1px dashed rgba(139,92,246,.55);padding-bottom:1px;user-select:none;transition:color .15s}
 .pts-libtag:hover{color:var(--acc2)}
 .pts-libtag.pin{color:var(--acc2)}
@@ -1328,7 +1328,7 @@ export function mountUI(root, api, opts) {
     return btn;
   }
 
-  // 媒体库集数标签：卡片第二行右侧的「媒体库 X 集」。
+  // 媒体库集数标签：卡片第二行右侧的「已入库 X 集」。
   // 悬停立即展开具体是哪几集；点击可钉住，方便移开鼠标慢慢看；再点或点别处收起。
   // 浮层是挂在 body 上的单例（fixed 定位），不遮本卡文字、也不被卡片 overflow 裁掉。
   // 老订阅还没同步过媒体库时 library_eps 是「下到过的集」的回退值，标题里写清楚。
@@ -1357,7 +1357,7 @@ export function mountUI(root, api, opts) {
   function openLibPop(tag, eps, n) {
     ensureLibPop();
     libPopTag = tag;
-    libPop.children[0].textContent = '媒体库已入库集数';
+    libPop.children[0].textContent = '已入库集数';
     libPop.children[1].textContent = eps.join('、');
     libPop.children[2].textContent = '共 ' + n + ' 集';
     libPop.classList.add('show');
@@ -1374,7 +1374,7 @@ export function mountUI(root, api, opts) {
       ? sub.library_eps.slice().sort((a, b) => a - b) : [];
     const n = Number(sub.lib_count) || eps.length || 0;
     if (!n) return null;
-    const tag = el('span', 'pts-libtag', '媒体库 ' + n + ' 集');
+    const tag = el('span', 'pts-libtag', '已入库 ' + n + ' 集');
     if (!eps.length) {
       tag.title = '媒体库已入库 ' + n + ' 集';
       return tag;
@@ -1474,7 +1474,7 @@ export function mountUI(root, api, opts) {
     bodyEl.append(when);
     card.append(bodyEl);
 
-    // 第二行小字：订阅区间 + 一共几集 + 还差几集（+ 媒体库现在有几集）。
+    // 第二行小字：订阅区间 + 一共几集 + 还差几集（+ 媒体库已入库几集）。
     // 用户说过「外面的数字要和里面填的对得上」，所以区间直接摊开写，不缩成 3/36。
     if (sub.kind !== 'movie' && scTotal) {
       bodyEl.style.paddingBottom = '3px';
@@ -1485,7 +1485,7 @@ export function mountUI(root, api, opts) {
       const libEl = libTag(sub);
       if (libEl) info.append(el('span', 'sp'), libEl);
       info.title = `订阅第 ${scStart}~${scEnd} 集，共 ${scTotal} 集；已下 ${scDone} 集，还差 ${scLeft} 集`
-        + '。已下过的集（包括看完删掉的）不会重复下载；右侧「媒体库」悬停可看具体集数。';
+        + '。已下过的集（包括看完删掉的）不会重复下载；右侧「已入库」悬停可看具体集数。';
       card.append(info);
     }
 
