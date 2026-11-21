@@ -177,21 +177,21 @@ def parse_season(title: str) -> int | None:
 
 
 def next_episode(sub: dict) -> int | None:
-    """下一个还没下到的集数；电影或全部补齐时返回 None。
+    """下一个要下的集数：从「已经下到的最高集」往后走一格；电影或追完返回 None。
 
-    补搜的核心就靠它：只盯「第一个缺失集」，下到就记一笔，下次自动看下一集。
+    这里**不能**用「第一个缺失集」的算法。用户看完就删、或者某批下载转移失败，
+    中间那几集在任何持久记录里都查不到，按缺口补就会把 44 又下一遍
+    （11/21 晚《光阴之外》重下第 43 集就是这么来的）。
+    改为水位式：只要下到过 48，下一集就是 49，绝不回头补旧集。
     """
     if (sub.get("kind") or "series") == "movie":
         return None
     start = int(sub.get("ep_start") or 1)
     end = int(sub.get("ep_end") or 999)
     done = {int(x) for x in (sub.get("delivered_eps") or [])}
-    ep = start
-    while ep <= end:
-        if ep not in done:
-            return ep
-        ep += 1
-    return None
+    high = max(done) if done else 0
+    ep = high + 1 if high >= start else start
+    return ep if ep <= end else None
 
 
 def recommend_from_air(air: dict) -> tuple[str, str]:

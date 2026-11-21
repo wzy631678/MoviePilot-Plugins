@@ -445,24 +445,22 @@ def library_eps(tmdb_id: int, season: int | None = None) -> list[int]:
     return sorted(eps)
 
 
-def transferred_eps(tmdb_id: int, season: int | None = None) -> list[int]:
-    """查 MoviePilot 下载/转移历史（TransferHistory 表）里真正下到过的集数。
+def _history_eps(model_name: str, tmdb_id: int, season: int | None = None) -> list[int]:
+    """从 MP 的历史表里解析「某部剧下到过哪几集」。
 
-    这是「下到过」最权威的持久记录：用户把看完的集从媒体库删掉腾空间后，
-    媒体库（MediaServerItem）里就没有这些集了，但 TransferHistory 仍留着
-    「哪几集曾经成功下载并转移过」。补搜时把它并进台账，已删的集就不会被
-    当成缺失而重复下载（「看完删了就不用再下，只下新出的」）。
+    TransferHistory（下载并转移成功）和 DownloadHistory（下载完成）字段结构一致：
+    media_source 标记数据源、seasons 形如 "S01"、episodes 形如 "E43"/"E1,E2,E3"。
     查不到就返回空，不影响订阅。
     """
     try:
         from app.db import get_db
-        from app.db.models import TransferHistory
+        from app.db import models as M
 
+        model = getattr(M, model_name)
         db = next(get_db())
-        rows = db.query(TransferHistory).filter(
-            TransferHistory.media_id == str(int(tmdb_id))).all()
+        rows = db.query(model).filter(model.media_id == str(int(tmdb_id))).all()
     except Exception as exc:
-        logger.debug(f"[PtSubscriber] 转移历史读取失败：{type(exc).__name__}: {str(exc)[:120]}")
+        logger.debug(f"[PtSubscriber] {model_name} 读取失败：{type(exc).__name__}: {str(exc)[:120]}")
         return []
     eps: set[int] = set()
     for row in rows or []:
@@ -485,3 +483,22 @@ def transferred_eps(tmdb_id: int, season: int | None = None) -> list[int]:
             if num >= 1:
                 eps.add(num)
     return sorted(eps)
+
+
+def transferred_eps(tmdb_id: int, season: int | None = None) -> list[int]:
+    """下载并**成功转移进媒体库**的集数（文件删了记录仍在）。
+
+    用户把看完的集删掉腾空间后，媒体库（MediaServerItem）里就没有这些集了，
+    TransferHistory 仍留着「哪几集曾经成功下载并转移过」。
+    """
+    return _history_eps("TransferHistory", tmdb_id, season)
+
+
+def downloaded_eps(tmdb_id: int, season: int | None = None) -> list[int]:
+    """**下载完成过**的集数（DownloadHistory），比转移历史更宽。
+
+    有些集下载完成了但转移失败（命名/硬链接报错、或者用户直接删了下载目录），
+    这类在 TransferHistory 里查不到，只认转移历史就会把下过的集再下一遍。
+    DownloadHistory 记着「下载器确实收完过这一集」，一并算作已下。
+    """
+    return _history_eps("DownloadHistory", tmdb_id, season)

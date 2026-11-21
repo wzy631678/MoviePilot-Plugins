@@ -31,6 +31,7 @@ from .meta import search_fast as search_meta_fast
 from .meta import air_dates as meta_air_dates
 from .meta import library_eps as meta_library_eps
 from .meta import transferred_eps as meta_transferred_eps
+from .meta import downloaded_eps as meta_downloaded_eps
 from .models import (
     next_episode,
     recommend_from_air,
@@ -205,7 +206,7 @@ def _name_tier(core: str, title: str) -> int:
 class PtSubscriber(_PluginBase):
     plugin_name = "定时订阅下载"
     plugin_desc = "默认按 TMDB 推荐更新时间自动到指定站点搜资源（也可自选每天/每周指定星期几点），按详细规则下载到指定容器；自动对接 TMDB，按片名、年份、剧集/电影、集数逐项比对，只把真正这部排在最前，并把每集播出日列成表；读媒体库只补没入库的集，已下过的（含删掉的）不重下。聊天入口不用打斜杠，一条说全最省事：「订阅 天下第一 观众 1080P 周一5:30」（片名/站点/清晰度/周期顺序随意）；也可以只发「订阅 天才女友」先列同名作品，回序号后再选「从第几集 / 哪些站 / 多久刷一次」，回「确定」立刻补搜并把能下的资源列出来让你挑；「查资源 仙逆 馒头 1080P」只搜一轮直接下，不建订阅。斜杠命令 /ptsub、/ptfind、/ptlist 一样可用；回复全是纯文本不带图。"
-    plugin_version = "1.10.10"
+    plugin_version = "1.10.11"
     plugin_author = "wzy"
     plugin_config_prefix = "ptsubscriber_"
     plugin_order = 90
@@ -554,8 +555,9 @@ class PtSubscriber(_PluginBase):
                 season = sub.get("season")
                 lib = meta_library_eps(tmdb_id, season) or []
                 hist = meta_transferred_eps(tmdb_id, season) or []
+                dl = meta_downloaded_eps(tmdb_id, season) or []
                 self.store.set_sub_fields(sid, library_eps=lib, lib_synced=True)
-                delivered = sorted({*lib, *hist})
+                delivered = sorted({*lib, *hist, *dl})
                 if delivered:
                     self.store.mark_delivered(sid, delivered)
                 sub = self.store.get_sub(sid) or sub
@@ -778,10 +780,11 @@ class PtSubscriber(_PluginBase):
                 tmdb_id = int(sub["tmdb_id"])
                 season = sub.get("season")
                 lib = meta_library_eps(tmdb_id, season) or []
-                # 已删掉看过的集也要算「下到过」：转移历史记得住，
+                # 已删掉看过的集也要算「下到过」：转移历史 + 下载历史都记得住，
                 # 只查媒体库当前存量会把删掉的集当成缺失又下一遍。
                 hist = meta_transferred_eps(tmdb_id, season) or []
-                delivered = sorted({*lib, *hist})
+                dl = meta_downloaded_eps(tmdb_id, season) or []
+                delivered = sorted({*lib, *hist, *dl})
                 if delivered:
                     self.store.mark_delivered(sid, delivered)
                 self.store.set_sub_fields(sid, library_eps=lib, lib_synced=True,
@@ -974,12 +977,17 @@ class PtSubscriber(_PluginBase):
         except Exception as exc:
             logger.warning(f"[{self.plugin_name}] 转移历史读取失败：{type(exc).__name__}: {exc}")
             hist = []
+        try:
+            dl = meta_downloaded_eps(int(tmdb_id), season)
+        except Exception as exc:
+            logger.warning(f"[{self.plugin_name}] 下载历史读取失败：{type(exc).__name__}: {exc}")
+            dl = []
         return {"ok": True,
                 "next_ep": air.get("next_ep"), "next_air_date": air.get("next_air_date") or "",
                 "last_ep": air.get("last_ep"), "last_air_date": air.get("last_air_date") or "",
                 "eps": air.get("eps") or [], "library_eps": lib,
                 # 下到过（含已删）的集数合计：新建订阅时按这个提示从第几集补
-                "delivered_eps": sorted({*lib, *hist})}
+                "delivered_eps": sorted({*lib, *hist, *dl})}
 
     def api_meta_refresh(self, payload: dict = Body(default={})) -> dict:
         """给所有订阅补/刷新 TMDB 海报与总集数；force=True 时连已有的也重查。"""
@@ -1222,11 +1230,12 @@ class PtSubscriber(_PluginBase):
             except Exception as exc:
                 notes.append(f"{item['name']} 落库失败：{str(exc)[:60]}")
                 continue
-            # 媒体库已入库 + 转移历史里下到过（含已删）的集并进台账，导入后只补其它集
+            # 媒体库已入库 + 转移历史 + 下载历史里下到过（含已删）的集并进台账
             if with_library and item["tmdb_id"]:
                 try:
                     done = set(meta_library_eps(int(item["tmdb_id"]), item["season"]) or [])
                     done.update(meta_transferred_eps(int(item["tmdb_id"]), item["season"]) or [])
+                    done.update(meta_downloaded_eps(int(item["tmdb_id"]), item["season"]) or [])
                     if done:
                         self.store.mark_delivered(str(sub.get("id") or ""), sorted(done))
                 except Exception as exc:  # noqa: BLE001 - 媒体库读不到不影响导入
