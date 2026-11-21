@@ -30,6 +30,7 @@ from .meta import search as search_meta
 from .meta import search_fast as search_meta_fast
 from .meta import air_dates as meta_air_dates
 from .meta import library_eps as meta_library_eps
+from .meta import transferred_eps as meta_transferred_eps
 from .models import (
     next_episode,
     recommend_from_air,
@@ -204,7 +205,7 @@ def _name_tier(core: str, title: str) -> int:
 class PtSubscriber(_PluginBase):
     plugin_name = "定时订阅下载"
     plugin_desc = "默认按 TMDB 推荐更新时间自动到指定站点搜资源（也可自选每天/每周指定星期几点），按详细规则下载到指定容器；自动对接 TMDB，按片名、年份、剧集/电影、集数逐项比对，只把真正这部排在最前，并把每集播出日列成表；读媒体库只补没入库的集，已下过的（含删掉的）不重下。聊天入口不用打斜杠，一条说全最省事：「订阅 天下第一 观众 1080P 周一5:30」（片名/站点/清晰度/周期顺序随意）；也可以只发「订阅 天才女友」先列同名作品，回序号后再选「从第几集 / 哪些站 / 多久刷一次」，回「确定」立刻补搜并把能下的资源列出来让你挑；「查资源 仙逆 馒头 1080P」只搜一轮直接下，不建订阅。斜杠命令 /ptsub、/ptfind、/ptlist 一样可用；回复全是纯文本不带图。"
-    plugin_version = "1.10.9"
+    plugin_version = "1.10.10"
     plugin_author = "wzy"
     plugin_config_prefix = "ptsubscriber_"
     plugin_order = 90
@@ -541,18 +542,25 @@ class PtSubscriber(_PluginBase):
         domains = sub.get("site_ids") or []
         keyword = search_keyword(sub)
         is_movie = (sub.get("kind") or "series") == "movie"
-        # 补搜前先对齐媒体库：已入库的集直接算「下到过」，只增不减。
-        # 用户把看过、腾空间的集删了也不会回头重下——台账（delivered_eps）记的是历史，
-        # 媒体库只是当前存量。这一条是「1-10 删了别再下 1-10」的保证。
+        # 补搜前先对齐媒体库 + 转移历史：真正「下到过」的集直接算已下，只增不减。
+        # 关键是两条来源：
+        #   ① 媒体库当前存量（library_eps）——现在还在库里的；
+        #   ② 下载/转移历史（transferred_eps）——下到过、后来看完删掉的也在里面。
+        # 只查媒体库是不够的：用户删掉的集不在库里，但转移历史记得住，
+        # 否则「看完删了的集」会被当成缺失反复重下（用户反馈过的严重问题）。
         if not is_movie and sub.get("tmdb_id"):
             try:
-                lib = meta_library_eps(int(sub["tmdb_id"]), sub.get("season")) or []
+                tmdb_id = int(sub["tmdb_id"])
+                season = sub.get("season")
+                lib = meta_library_eps(tmdb_id, season) or []
+                hist = meta_transferred_eps(tmdb_id, season) or []
                 self.store.set_sub_fields(sid, library_eps=lib, lib_synced=True)
-                if lib:
-                    self.store.mark_delivered(sid, lib)
+                delivered = sorted({*lib, *hist})
+                if delivered:
+                    self.store.mark_delivered(sid, delivered)
                 sub = self.store.get_sub(sid) or sub
-            except Exception as exc:  # noqa: BLE001 - 媒体库读不到不影响补搜
-                logger.debug(f"[{self.plugin_name}] 补搜前读媒体库失败：{type(exc).__name__}: {exc}")
+            except Exception as exc:  # noqa: BLE001 - 媒体库/历史读不到不影响补搜
+                logger.debug(f"[{self.plugin_name}] 补搜前读媒体库/转移历史失败：{type(exc).__name__}: {exc}")
         # 填了集数区间就「一集一集补」（追更场景）；没填就一次把命中的都收下来（补老剧）
         one_by_one = (not is_movie) and bool(sub.get("ep_start") or sub.get("ep_end"))
         target = next_episode(sub) if one_by_one else None
@@ -763,14 +771,24 @@ class PtSubscriber(_PluginBase):
         sid = str(sub.get("id") or "")
         if not sid:
             return sub
+        from datetime import datetime as _dt
         try:
             lib: list[int] = []
             if sub.get("tmdb_id") and (sub.get("kind") or "series") != "movie":
-                lib = meta_library_eps(int(sub["tmdb_id"]), sub.get("season")) or []
-                if lib:
-                    self.store.mark_delivered(sid, lib)
-                self.store.set_sub_fields(sid, library_eps=lib, lib_synced=True)
-            if sub.get("tmdb_id") and (sub.get("kind") or "series") != "movie":
+                tmdb_id = int(sub["tmdb_id"])
+                season = sub.get("season")
+                lib = meta_library_eps(tmdb_id, season) or []
+                # 已删掉看过的集也要算「下到过」：转移历史记得住，
+                # 只查媒体库当前存量会把删掉的集当成缺失又下一遍。
+                hist = meta_transferred_eps(tmdb_id, season) or []
+                delivered = sorted({*lib, *hist})
+                if delivered:
+                    self.store.mark_delivered(sid, delivered)
+                self.store.set_sub_fields(sid, library_eps=lib, lib_synced=True,
+                                          lib_at=_dt.now().strftime("%Y-%m-%d %H:%M:%S"))
+            # TMDB 播出日只在还没查过时查（网络请求慢），查过就不再重复打 TMDB
+            if (sub.get("tmdb_id") and (sub.get("kind") or "series") != "movie"
+                    and (not sub.get("air_state") or not (sub.get("recommend_date") or "").strip())):
                 # 推荐更新日自动补全：先看还没播的下一集；整季已经播完（如 Doctor X 12/12）
                 # 就用最后一集的播出日兜底，别让「推荐更新」永远挂着红色的「未设置」。
                 air = meta_air_dates(int(sub["tmdb_id"]), sub.get("season")) or {}
@@ -839,10 +857,27 @@ class PtSubscriber(_PluginBase):
         # 顺手补一次推荐更新日 + 媒体库集数。每次请求最多补 2 条，避免列表接口被 TMDB
         # 查询拖慢；补过一次就置位（查不到也记 unknown），不会每次打开页面都重查。
         try:
-            pending = [s for s in self.store.subs()
-                       if s.get("tmdb_id") and (s.get("kind") or "series") != "movie"
-                       and (not s.get("lib_synced") or not s.get("air_state"))][:2]
-            for sub in pending:
+            # 「媒体库存量」要定期刷新：用户看完就删，库里的集会越来越少，
+            # 只在首次同步一次的话卡片会一直挂着旧数字。每次请求最多刷 2 条、
+            # 最久没刷过的优先，打开几次页面就陆续对齐，且只打 PG（TMDB 只在没查过时打）。
+            from datetime import datetime as _dt
+            now_ts = _dt.now()
+            stale = []
+            for s in self.store.subs():
+                if not s.get("tmdb_id") or (s.get("kind") or "series") == "movie":
+                    continue
+                if not s.get("lib_synced") or not s.get("air_state"):
+                    stale.append((0, s))
+                    continue
+                raw = str(s.get("lib_at") or "")
+                try:
+                    age = (now_ts - _dt.strptime(raw, "%Y-%m-%d %H:%M:%S")).total_seconds()
+                except (TypeError, ValueError):
+                    age = 1e9   # 没有时间戳的当「很久没刷」
+                if age > 600:   # 10 分钟以上才重刷，避免刷新页面就重复查
+                    stale.append((age, s))
+            stale.sort(key=lambda x: -x[0])
+            for _, sub in stale[:2]:
                 self._refresh_schedule_cache(sub)
         except Exception as exc:  # noqa: BLE001 - 补缓存失败不能影响列表加载
             logger.debug(f"[{self.plugin_name}] 列表接口补媒体库缓存失败：{type(exc).__name__}: {exc}")
@@ -934,10 +969,17 @@ class PtSubscriber(_PluginBase):
         except Exception as exc:
             logger.warning(f"[{self.plugin_name}] 媒体库读取失败：{type(exc).__name__}: {exc}")
             lib = []
+        try:
+            hist = meta_transferred_eps(int(tmdb_id), season)
+        except Exception as exc:
+            logger.warning(f"[{self.plugin_name}] 转移历史读取失败：{type(exc).__name__}: {exc}")
+            hist = []
         return {"ok": True,
                 "next_ep": air.get("next_ep"), "next_air_date": air.get("next_air_date") or "",
                 "last_ep": air.get("last_ep"), "last_air_date": air.get("last_air_date") or "",
-                "eps": air.get("eps") or [], "library_eps": lib}
+                "eps": air.get("eps") or [], "library_eps": lib,
+                # 下到过（含已删）的集数合计：新建订阅时按这个提示从第几集补
+                "delivered_eps": sorted({*lib, *hist})}
 
     def api_meta_refresh(self, payload: dict = Body(default={})) -> dict:
         """给所有订阅补/刷新 TMDB 海报与总集数；force=True 时连已有的也重查。"""
@@ -1180,14 +1222,15 @@ class PtSubscriber(_PluginBase):
             except Exception as exc:
                 notes.append(f"{item['name']} 落库失败：{str(exc)[:60]}")
                 continue
-            # 媒体库已入库的集并进台账，导入后只补其它集，不重下一遍
+            # 媒体库已入库 + 转移历史里下到过（含已删）的集并进台账，导入后只补其它集
             if with_library and item["tmdb_id"]:
                 try:
-                    done = meta_library_eps(int(item["tmdb_id"]), item["season"])
+                    done = set(meta_library_eps(int(item["tmdb_id"]), item["season"]) or [])
+                    done.update(meta_transferred_eps(int(item["tmdb_id"]), item["season"]) or [])
                     if done:
-                        self.store.mark_delivered(str(sub.get("id") or ""), done)
+                        self.store.mark_delivered(str(sub.get("id") or ""), sorted(done))
                 except Exception as exc:  # noqa: BLE001 - 媒体库读不到不影响导入
-                    logger.debug(f"[{self.plugin_name}] 导入时读媒体库失败：{type(exc).__name__}: {exc}")
+                    logger.debug(f"[{self.plugin_name}] 导入时读媒体库/转移历史失败：{type(exc).__name__}: {exc}")
             try:
                 sub2 = self._fill_meta(self.store.get_sub(str(sub.get("id") or "")) or sub,
                                        int(item["tmdb_id"]) or None)

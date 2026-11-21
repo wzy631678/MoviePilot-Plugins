@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import date
 from typing import Any
 
@@ -441,4 +442,46 @@ def library_eps(tmdb_id: int, season: int | None = None) -> list[int]:
                     continue
                 if num >= 1:
                     eps.add(num)
+    return sorted(eps)
+
+
+def transferred_eps(tmdb_id: int, season: int | None = None) -> list[int]:
+    """查 MoviePilot 下载/转移历史（TransferHistory 表）里真正下到过的集数。
+
+    这是「下到过」最权威的持久记录：用户把看完的集从媒体库删掉腾空间后，
+    媒体库（MediaServerItem）里就没有这些集了，但 TransferHistory 仍留着
+    「哪几集曾经成功下载并转移过」。补搜时把它并进台账，已删的集就不会被
+    当成缺失而重复下载（「看完删了就不用再下，只下新出的」）。
+    查不到就返回空，不影响订阅。
+    """
+    try:
+        from app.db import get_db
+        from app.db.models import TransferHistory
+
+        db = next(get_db())
+        rows = db.query(TransferHistory).filter(
+            TransferHistory.media_id == str(int(tmdb_id))).all()
+    except Exception as exc:
+        logger.debug(f"[PtSubscriber] 转移历史读取失败：{type(exc).__name__}: {str(exc)[:120]}")
+        return []
+    eps: set[int] = set()
+    for row in rows or []:
+        if str(getattr(row, "media_source", "") or "").lower() not in ("themoviedb", "tmdb"):
+            continue
+        # seasons 形如 "S01"/"S1"；去掉 S 再按整数比，避免 "01" != "1" 把整季过滤掉
+        s_raw = str(getattr(row, "seasons", "") or "").lower().replace("s", "").strip()
+        if season:
+            try:
+                if s_raw and int(s_raw) != int(season):
+                    continue
+            except (TypeError, ValueError):
+                pass
+        # episodes 形如 "E43" / "E1,E2,E3" / "E01"
+        for m in re.findall(r"E(\d+)", str(getattr(row, "episodes", "") or "")):
+            try:
+                num = int(m)
+            except (TypeError, ValueError):
+                continue
+            if num >= 1:
+                eps.add(num)
     return sorted(eps)
