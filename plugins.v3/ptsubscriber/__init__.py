@@ -729,14 +729,60 @@ class PtSubscriber(_PluginBase):
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[{self.plugin_name}] 补跑排队失败：{type(exc).__name__}: {exc}")
 
+    def _downloader_ready(self, sub: dict) -> tuple[bool, str]:
+        """补跑前先确认下载器实例在（刚开机时 qb / transmission 可能还没就绪）。
+
+        只做不联网的检查（联网探测遇到掉线的下载器反而会卡住）：
+        实例不存在就直接推后，实例在就交给下面带超时的执行去看结果。
+        """
+        try:
+            from app.sdk.services import DownloaderHelper
+
+            helper = DownloaderHelper()
+            configs = helper.get_configs() or {}
+            name = str(sub.get("downloader_id") or "")
+            if not name:
+                name = next((n for n, c in configs.items()
+                             if bool(getattr(c, "default", False))), "") or next(iter(configs), "")
+            if not name:
+                return True, ""  # 一条都没配：交给提交环节报错更准确
+            service = helper.get_service(name=name)
+            if not service or not getattr(service, "instance", None):
+                return False, f"「{name}」还没就绪"
+            return True, ""
+        except Exception as exc:  # noqa: BLE001 - 检查本身出错就不拦
+            logger.debug(f"[{self.plugin_name}] 下载器预检跳过：{type(exc).__name__}: {exc}")
+            return True, ""
+
     def _catch_up_run(self, sid: str, note: str = "补漏", remaining: int = 1) -> None:
         """补跑一轮；关机几天积了好几集时，接着排下一轮（一次补一集）。"""
         sub = self.store.get_sub(sid)
         if not sub or not sub.get("enabled"):
             return
+        ok, why = self._downloader_ready(sub)
+        if not ok:
+            # 开机时下载器还没起来：别硬提交（会卡住），10 分钟后再来
+            logger.info(f"[{self.plugin_name}] 补跑暂缓：{sub.get('name')} 的下载器{why}，10 分钟后再试")
+            self._schedule_catchup(sid, 600, note, remaining)
+            return
         before = {int(x) for x in (sub.get("delivered_eps") or [])}
         logger.info(f"[{self.plugin_name}] {note}：{sub.get('name')} 立刻补跑一轮")
-        self._run_sub(sid, reason=note)
+        # 提交环节偶发卡死（下载器掉线、种子站没响应）时至少能留下一条记录并改期重试，
+        # 不然这一轮会一直挂着，日志里永远看不到结果。
+        done = threading.Event()
+
+        def _work() -> None:
+            try:
+                self._run_sub(sid, reason=note)
+            finally:
+                done.set()
+
+        threading.Thread(target=_work, name=f"ptsub-catchup-{sid}", daemon=True).start()
+        if not done.wait(timeout=600):
+            logger.warning(f"[{self.plugin_name}] 补跑超时（10 分钟没有结果）：{sub.get('name')}，"
+                           f"多半是下载器或站点没响应，30 分钟后再试")
+            self._schedule_catchup(sid, 1800, note, remaining)
+            return
         if remaining <= 1:
             return
         after_sub = self.store.get_sub(sid) or {}
