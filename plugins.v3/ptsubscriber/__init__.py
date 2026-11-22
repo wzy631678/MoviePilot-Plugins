@@ -102,7 +102,7 @@ def _recommend_start(sub: dict, tz: str):
     if len(text) < 10:
         return None
     try:
-        hour, minute = (int(x) for x in str(sub.get("schedule_time") or "20:00").split(":"))
+        hour, minute = (int(x) for x in str(sub.get("schedule_time") or "19:00").split(":"))
         tzinfo = None
         try:
             from zoneinfo import ZoneInfo
@@ -148,9 +148,9 @@ def last_fire_time(sub: dict, now, last_at=None):
             return None
         return base + timedelta(minutes=max(5, int(sub.get("schedule_interval") or 120)))
     try:
-        hour, minute = (int(x) for x in str(sub.get("schedule_time") or "20:00").split(":"))
+        hour, minute = (int(x) for x in str(sub.get("schedule_time") or "19:00").split(":"))
     except (TypeError, ValueError):
-        hour, minute = 20, 0
+        hour, minute = 19, 0
     fire = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if mode == "weekly":
         key = str(sub.get("schedule_weekday") or "mon").lower()[:3]
@@ -174,7 +174,7 @@ def build_trigger(sub: dict, tz: str):
     mode = sub.get("schedule_mode", "recommend")
     if mode == "interval":
         return IntervalTrigger(minutes=max(5, int(sub.get("schedule_interval") or 120)), timezone=tz)
-    hour, minute = (int(x) for x in str(sub.get("schedule_time") or "20:00").split(":"))
+    hour, minute = (int(x) for x in str(sub.get("schedule_time") or "19:00").split(":"))
     start = _recommend_start(sub, tz) if mode == "recommend" else None
     if mode == "weekly":
         return CronTrigger(day_of_week=sub.get("schedule_weekday") or "mon",
@@ -258,7 +258,7 @@ def _name_tier(core: str, title: str) -> int:
 class PtSubscriber(_PluginBase):
     plugin_name = "定时订阅下载"
     plugin_desc = "默认按 TMDB 推荐更新时间自动到指定站点搜资源（也可自选每天/每周指定星期几点），按详细规则下载到指定容器；自动对接 TMDB，按片名、年份、剧集/电影、集数逐项比对，只把真正这部排在最前，并把每集播出日列成表；读媒体库只补没入库的集，已下过的（含删掉的）不重下。聊天入口不用打斜杠，一条说全最省事：「订阅 天下第一 观众 1080P 周一5:30」（片名/站点/清晰度/周期顺序随意）；也可以只发「订阅 天才女友」先列同名作品，回序号后再选「从第几集 / 哪些站 / 多久刷一次」，回「确定」立刻补搜并把能下的资源列出来让你挑；「查资源 仙逆 馒头 1080P」只搜一轮直接下，不建订阅。斜杠命令 /ptsub、/ptfind、/ptlist 一样可用；回复全是纯文本不带图。"
-    plugin_version = "1.10.13"
+    plugin_version = "1.10.14"
     plugin_author = "wzy"
     plugin_config_prefix = "ptsubscriber_"
     plugin_order = 90
@@ -286,11 +286,11 @@ class PtSubscriber(_PluginBase):
         self._max_results = max(10, min(200, int(cfg.get("max_results") or 50)))
         self.store = Store(PluginDataBackend(self))
         self.bridge = MPBridge(logger)
-        # 老订阅的「每天 03:00」是插件早期默认值，换成晚上 20:00（自己定过时间的模式不动）
+        # 老订阅的「每天 03:00」是插件早期默认值，换成晚上 19:00（自己定过时间的模式不动）
         try:
             fixed = self.store.migrate_evening_default()
             if fixed:
-                logger.info(f"[{self.plugin_name}] {fixed} 条订阅的默认执行时间由 03:00 改为 20:00")
+                logger.info(f"[{self.plugin_name}] {fixed} 条订阅的默认执行时间由 03:00 改为 19:00")
         except Exception as exc:  # noqa: BLE001 - 迁移失败不影响启动
             logger.debug(f"[{self.plugin_name}] 执行时间迁移跳过：{type(exc).__name__}: {exc}")
         # 「每天」是老默认值，现在默认是「按 TMDB 推荐时间」，顺手把老订阅搬过去
@@ -642,6 +642,10 @@ class PtSubscriber(_PluginBase):
 
         节目表（TMDB）说新集已经播了、而台账的最高水位还没到那集，才算漏了。
         查不到节目表 / 没填 tmdb_id 时保守放行：宁可多搜一次，也别漏更新。
+
+        「今天才播」的那集要等到当天计划时间（schedule_time）之后才认：
+        站点一般是晚上才出种，白天就催只会空搜一趟（用户说的「别过早狂搜」）。
+        昨天及更早播的照旧算数，所以关机错过的集第二天开机仍会补。
         """
         if (sub.get("kind") or "series") == "movie":
             return not bool(sub.get("delivered_eps"))
@@ -658,11 +662,21 @@ class PtSubscriber(_PluginBase):
             logger.debug(f"[{self.plugin_name}] 补跑查节目表失败：{type(exc).__name__}: {exc}")
             return True
         today = now.strftime("%Y-%m-%d")
+        try:
+            fh, fm = (int(x) for x in str(sub.get("schedule_time") or "19:00").split(":"))
+        except (TypeError, ValueError):
+            fh, fm = 19, 0
+        # 今天播的集，在计划时间点之前先不催：白天站点多半还没种。
+        # 到点 cron 会正常跑；万一那天关机错过，第二天它已是「过去播的」，仍会补。
+        allow_today = now >= now.replace(hour=fh, minute=fm, second=0, microsecond=0)
         eps = air.get("eps") or []
         aired = [int(e.get("ep") or 0) for e in eps
-                 if e.get("ep") and e.get("air_date") and str(e["air_date"])[:10] <= today]
+                 if e.get("ep") and e.get("air_date")
+                 and (str(e["air_date"])[:10] < today
+                      or (str(e["air_date"])[:10] == today and allow_today))]
         if not aired:
-            # 节目表有集数据但一集都还没播（新剧还没开播）→ 确实没得下，别白搜
+            # 节目表有集数据但一集都还没播（新剧还没开播），或今天才播还没到点
+            # → 确实没得下，别白搜
             return not eps
         high = max((int(x) for x in (sub.get("delivered_eps") or [])), default=0)
         return max(aired) > high
@@ -1908,8 +1922,8 @@ class PtSubscriber(_PluginBase):
 
     @staticmethod
     def _default_plan_text() -> str:
-        """新订阅的默认刷新计划（模型默认每天 20:00）。"""
-        return "每天 20:00"
+        """新订阅的默认刷新计划（模型默认每天 19:00）。"""
+        return "每天 19:00"
 
     # ------------------------------------------------------------------ /ptsub
     def remote_sub(self, arg: str, key: str = "") -> str:

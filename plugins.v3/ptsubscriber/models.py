@@ -35,9 +35,9 @@ class SubscriptionIn(BaseModel):
     # recommend = 按 TMDB 推荐时间（recommend_date 那天起每天守候，不手动定星期几几点）
     # daily 是早期默认值，v1.10.5 起启动时自动搬成 recommend，保留字面量只为兼容老数据
     schedule_mode: Literal["recommend", "daily", "weekly", "interval"] = "recommend"
-    # 默认晚上 20:00：TMDB 的推荐更新日只有「哪天」，真正出种多在当晚 19 点以后，
+    # 默认晚上 19:00：TMDB 的推荐更新日只有「哪天」，真正出种多在当晚 19 点前后，
     # 凌晨 3 点去搜往往比首播晚了半天，免费种子的窗口已经过了。
-    schedule_time: str = "20:00"
+    schedule_time: str = "19:00"
     schedule_weekday: Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"] = "mon"
     schedule_interval: int = 120
     # 本轮没搜到（还没更新）时，每 retry_interval 分钟再搜一次，
@@ -333,7 +333,7 @@ def schedule_label(sub: dict) -> str:
     避免错过免费种子；用户也可在「执行时间」里切回自定义每周指定星期。
     """
     mode = sub.get("schedule_mode", "recommend")
-    time_text = sub.get("schedule_time") or "20:00"
+    time_text = sub.get("schedule_time") or "19:00"
     retry = int(sub.get("retry_interval") or 0)
     window = int(sub.get("retry_window") or 0)
     tail = f"；没更新就每 {retry} 分钟再搜，最多守 {window} 分钟" if retry and window else ""

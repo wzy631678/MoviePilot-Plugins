@@ -1,5 +1,5 @@
 /* PtSubscriber 插件页面：原生 DOM，无构建工具，宿主注入的 api 负责鉴权。 */
-const UI_VERSION = '1.3.9';
+const UI_VERSION = '1.4.0';
 const CSS = `
 .pts-root,.pts-ov,.pts-libpop{--acc:#8b5cf6;--acc2:#a78bfa;--sur:#ffffff;--sur2:#f7f7fb;--sur3:#eeeef6;--on:#1f2230;--muted:rgba(31,34,48,.58);--line:rgba(17,24,39,.1);--soft:rgba(139,92,246,.12);--danger:#dc2626;--ok:#16a34a;--warn:#b45309}
 .pts-dark{--sur:#1b1e26;--sur2:#232733;--sur3:#2b3040;--on:#e9ebf2;--muted:rgba(233,235,242,.6);--line:rgba(255,255,255,.12);--soft:rgba(139,92,246,.22);--danger:#f87171;--ok:#4ade80;--warn:#fbbf24}
@@ -88,6 +88,18 @@ const CSS = `
 .pts-kebab.on-poster{position:absolute;top:7px;right:7px;width:27px;height:27px;background:rgba(10,12,18,.46);color:#fff;backdrop-filter:blur(4px);opacity:.5;transition:.16s}
 .pts-pcard:hover .pts-kebab.on-poster,.pts-kebab.on-poster:focus{opacity:1}
 .pts-kebab.on-poster:hover{background:rgba(10,12,18,.78);color:#fff}
+/* 海报右上角「找资源」快捷钮：在 kebab 左边，一点就直接去站点搜这部，不用等计划、不用进插件找资源页 */
+.pts-quick.on-poster{position:absolute;top:7px;right:40px;width:27px;height:27px;border:0;border-radius:7px;background:rgba(10,12,18,.46);color:#fff;backdrop-filter:blur(4px);opacity:.5;transition:.16s;display:grid;place-items:center;cursor:pointer;padding:0}
+.pts-pcard:hover .pts-quick.on-poster,.pts-quick.on-poster:focus{opacity:1}
+.pts-quick.on-poster:hover{background:rgba(139,92,246,.9);color:#fff}
+/* 找资源快捷浮层：复用表单壳，窄一点更适合「搜一搜 → 勾选 → 下」 */
+.pts-form.pts-qsearch{width:min(880px,100%)}
+.pts-qsearch .pts-form-body{display:block;overflow:auto;flex:1;min-height:0}
+.pts-qsearch .pts-qmain{padding:18px 20px}
+.pts-qsearch .pts-qresults{margin-top:14px}
+.pts-qsearch .pts-qempty{padding:22px;text-align:center;color:var(--muted);font-size:12.5px}
+.pts-qsearch .pts-qbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:14px}
+.pts-qsearch .pts-qstatus{font-size:12px;color:var(--muted);min-width:0}
 .pts-menu{position:absolute;right:8px;top:40px;z-index:30;background:var(--sur);border:1px solid var(--line);border-radius:11px;box-shadow:0 16px 36px rgba(0,0,0,.24);padding:5px;min-width:132px;display:flex;flex-direction:column;gap:1px}
 .pts-menu button{border:0;background:transparent;color:var(--on);text-align:left;padding:7px 9px;border-radius:7px;font-size:12.6px;cursor:pointer;font-family:inherit;display:flex;align-items:center;gap:8px;white-space:nowrap}
 .pts-menu button:hover{background:var(--soft);color:var(--acc)}
@@ -743,7 +755,7 @@ function prevDayWeekday(text) {
 
 function scheduleText(mode, time, weekday, interval) {
   if (mode === 'interval') return `每隔 ${Number(interval) || 120} 分钟到站点搜一次`;
-  const t = time || '20:00';
+  const t = time || '19:00';
   if (mode === 'weekly') return `每${WD_NAME[weekday] || '周一'} ${t} 到勾选站点搜资源`;
   return `每天 ${t} 到勾选站点搜资源`;
 }
@@ -1237,7 +1249,7 @@ export function mountUI(root, api, opts) {
     return raw.slice(0, 10);
   }
 
-  // 「下次执行」压成短文案：今天 20:00 / 明天 20:00 / 12月01日 20:00
+  // 「下次执行」压成短文案：今天 19:00 / 明天 19:00 / 12月01日 19:00
   function nextLabel(text) {
     const raw = String(text || '').trim();
     if (!raw) return '';
@@ -1309,6 +1321,7 @@ export function mountUI(root, api, opts) {
         });
         menu.append(b);
       };
+      item('找资源', 'search', () => openQuickSearch(sub));
       item('立即执行', 'play', () => runSub(sub));
       item('编辑任务', 'edit', () => openForm(sub));
       if (sub.kind !== 'movie') item('清空进度', 'rewind', () => resetSub(sub));
@@ -1425,6 +1438,13 @@ export function mountUI(root, api, opts) {
     if (meta.childNodes.length) top.append(meta);
     wrap.append(top);
 
+    // 海报右上角两个快捷钮：「找资源」（放大镜，直接搜这部）+ 更多操作（kebab）
+    const quick = el('button', 'pts-quick on-poster');
+    quick.type = 'button';
+    quick.title = '找资源：直接到站点搜这部，不用等计划、不用再进插件找资源页';
+    quick.append(iconEl('search', 15));
+    quick.addEventListener('click', (e) => { e.stopPropagation(); openQuickSearch(sub); });
+    wrap.append(quick);
     const kebab = kebabMenu(sub, card);
     kebab.classList.add('on-poster');
     wrap.append(kebab);
@@ -1499,6 +1519,165 @@ export function mountUI(root, api, opts) {
     }
     card.addEventListener('click', () => openForm(sub));
     return card;
+  }
+
+  // -------------------------------------------------------- 找资源（卡片快捷）
+  /* 卡片上一键进去搜这部：预填剧名、勾好这条订阅的站点和下载器，搜到直接挑一条下。
+     省掉「进插件 → 切找资源 → 重输名字 → 重勾站点」这一串，左侧任务墙也能直接用。
+     只搜不下，不改动订阅的补搜进度，纯粹是「手动补一枪」。 */
+  function openQuickSearch(sub) {
+    if (activeOverlay) { activeOverlay.remove(); activeOverlay = null; }
+    const ov = el('div', 'pts-ov' + (root.classList.contains('pts-dark') ? ' pts-dark' : ''));
+    const form = el('div', 'pts-form pts-qsearch');
+
+    const head = el('div', 'pts-form-head');
+    const mid = el('div', 'mid');
+    const ttl = (sub && (sub.meta_title || sub.name)) || '这部';
+    mid.append(
+      el('div', 'pts-form-title', '找资源 · ' + (sub && sub.name ? sub.name : '')),
+      el('div', 'pts-form-sub', '预填了『' + ttl + '』和你订阅的站点；搜到勾选就能下，不影响订阅的自动补搜进度'),
+    );
+    const btnClose = el('button', 'pts-icon-btn');
+    btnClose.type = 'button';
+    btnClose.title = '关闭';
+    btnClose.append(iconEl('close', 16));
+    head.append(mid, btnClose);
+    form.append(head);
+
+    const body = el('div', 'pts-form-body');
+    const main = el('div', 'pts-qmain');
+    body.append(main);
+    form.append(body);
+
+    const fKeyword = textInput(ttl, 'text', '剧名 / 关键词');
+    const dlOptions = [{ value: '', label: 'MP 默认下载器' }].concat(
+      (state.options.downloaders || []).map((d) => ({ value: d.name, label: d.name })));
+    const fDownloader = select(dlOptions, (sub && sub.downloader_id) || '');
+    const fSavePath = textInput((sub && sub.save_path) || '', 'text', '留空用下载器默认目录');
+
+    const g = el('div', 'pts-grid3');
+    g.append(field('关键词', fKeyword), field('下载器', fDownloader), field('保存目录', fSavePath));
+    main.append(g);
+
+    const sites = state.options.sites || [];
+    const chosen = new Set(Array.isArray(sub && sub.site_ids) ? sub.site_ids : []);
+    const pickerWrap = el('div', 'pts-f');
+    pickerWrap.style.marginTop = '12px';
+    pickerWrap.append(el('span', '', '搜索站点'));
+    const picker = sitePicker(sites, chosen);
+    pickerWrap.append(picker.node);
+    main.append(pickerWrap);
+
+    const bar = el('div', 'pts-qbar');
+    const status = el('span', 'pts-qstatus',
+      chosen.size ? `已预选订阅的 ${chosen.size} 个站点` : '请至少勾一个站点');
+    const results = el('div', 'pts-qresults');
+    const selected = new Set();
+    let token = null;
+    let lastItems = [];
+
+    function qCard(item) {
+      const c = el('div', 'pts-card main');
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.disabled = !!item.reason;
+      cb.addEventListener('change', () => (cb.checked ? selected.add(item.key) : selected.delete(item.key)));
+      const m = el('div', 'pts-main');
+      m.append(el('div', 'pts-title', item.display_title || item.title || '（无标题）'));
+      if (item.display_subtitle) m.append(el('div', 'pts-sub', item.display_subtitle));
+      const badges = el('div', 'pts-badges');
+      for (const b of item.badges || []) badges.append(el('span', 'pts-badge', b));
+      if (item.reason) badges.append(el('span', 'pts-badge warn', item.reason));
+      else badges.append(el('span', 'pts-badge ok', '符合规则'));
+      if (badges.childNodes.length) m.append(badges);
+      const meta = el('div', 'pts-meta');
+      meta.append(el('span', '', item.site || ''), el('span', '', fmtSize(item.size_gb)),
+        el('span', '', '做种 ' + (item.seeders ?? '—')),
+        el('span', '', '完成 ' + (item.grabs ?? '—')),
+        el('span', '', item.pubdate || ''));
+      m.append(meta);
+      if (item.page_url) {
+        const a = el('a', 'pts-sub', '详情页');
+        a.href = item.page_url;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        a.style.color = 'var(--acc)';
+        m.append(a);
+      }
+      c.append(cb, m);
+      return c;
+    }
+
+    function drawList(items) {
+      lastItems = items;
+      results.innerHTML = '';
+      if (!items.length) {
+        results.append(el('div', 'pts-qempty', '没有搜到资源。可换个关键词，或确认站点已启用且有搜索索引。'));
+        return;
+      }
+      const grid = el('div', 'pts-grid');
+      for (const it of items) grid.append(qCard(it));
+      results.append(grid);
+    }
+
+    const btnSearch = button('', async () => {
+      const domains = picker.get();
+      if (!domains.length) { status.textContent = '请至少勾选一个站点'; return; }
+      const kw = fKeyword.value.trim();
+      if (!kw) { status.textContent = '先填个关键词'; return; }
+      btnSearch.disabled = true;
+      status.textContent = '正在到站点搜索…';
+      results.innerHTML = '';
+      try {
+        const r = await call('POST', 'search', { keyword: kw, domains, preview: true });
+        if (!r.ok) { status.textContent = r.message || '搜索失败'; return; }
+        token = r.token;
+        selected.clear();
+        status.textContent = `共 ${(r.items || []).length} 条，符合规则 ${r.passed ?? 0} 条`;
+        drawList(r.items || []);
+      } catch (e) {
+        status.textContent = String(e && e.message ? e.message : e);
+      } finally { btnSearch.disabled = false; }
+    }, 'primary');
+    btnSearch.append(iconEl('search', 15), el('span', '', '搜索资源'));
+
+    const btnDownload = button('', async () => {
+      if (!token || !selected.size) { status.textContent = '先搜出来、勾选资源再下'; return; }
+      const keys = Array.from(selected);
+      const titles = {};
+      for (const it of lastItems) titles[it.key] = it.display_title || it.title;
+      btnDownload.disabled = true;
+      try {
+        const r = await call('POST', 'download', {
+          token, keys, titles,
+          downloader: fDownloader.value, category: '', save_path: fSavePath.value.trim(),
+        });
+        const ok = (r.results || []).filter((x) => x.ok).length;
+        status.textContent = r.ok ? `已提交 ${ok}/${keys.length} 条到下载器` : (r.message || '提交失败');
+        if (r.ok) await reloadAll();
+      } catch (e) {
+        status.textContent = String(e && e.message ? e.message : e);
+      } finally { btnDownload.disabled = false; }
+    }, 'primary');
+    btnDownload.append(iconEl('download', 15), el('span', '', '下载选中'));
+
+    bar.append(btnSearch, btnDownload, status);
+    main.append(bar, results);
+
+    const onKey = (e) => { if (e.key === 'Escape') close(); };
+    function close() {
+      document.removeEventListener('keydown', onKey);
+      if (activeOverlay === ov) activeOverlay = null;
+      ov.remove();
+    }
+    btnClose.addEventListener('click', close);
+    ov.addEventListener('click', (e) => { if (e.target === ov) close(); });
+    document.addEventListener('keydown', onKey);
+
+    ov.append(form);
+    activeOverlay = ov;
+    document.body.append(ov);
+    fKeyword.focus();
   }
 
   // -------------------------------------------------------------- 订阅表单
@@ -1786,7 +1965,7 @@ export function mountUI(root, api, opts) {
     sec3.append(segRow);
 
     const g3 = el('div', 'pts-grid3');
-    const fTime = textInput((sub && sub.schedule_time) || '20:00', 'time');
+    const fTime = textInput((sub && sub.schedule_time) || '19:00', 'time');
     const fWeekday = select(WEEKDAYS.map(([v, l]) => ({ value: v, label: l })),
       (sub && sub.schedule_weekday) || prevDayWeekday((sub && sub.recommend_date) || '') || 'mon');
     // 只有原本就是「每周指定星期」的订阅才保留自己定的星期；新建/从推荐切过来默认跟「TM 推荐日前一天」
@@ -1879,15 +2058,15 @@ export function mountUI(root, api, opts) {
         recModeHint.style.display = '';
         if (finishedRec) {
           // 整季播完（如 Doctor X 12/12）：没有下一集可等，就继续每天补没下到的集
-          recModeHint.textContent = `TMDB 上这一季已经播完：每天 ${fTime.value || '20:00'} 到勾选站点补还没下到的集，下齐就停。`;
+          recModeHint.textContent = `TMDB 上这一季已经播完：每天 ${fTime.value || '19:00'} 到勾选站点补还没下到的集，下齐就停。`;
         } else if (day) {
-          recModeHint.textContent = `按 TMDB 推荐时间：${epName} ${day} 更新后，每天 ${fTime.value || '20:00'} 自动去勾选站点搜，播完当天就能抓种。`;
+          recModeHint.textContent = `按 TMDB 推荐时间：${epName} ${day} 更新后，每天 ${fTime.value || '19:00'} 自动去勾选站点搜，播完当天就能抓种。`;
         } else {
-          recModeHint.textContent = `TMDB 还没给这一季的播出日：照样每天 ${fTime.value || '20:00'} 到点守候，出种就下，保存后会自动补上日期。`;
+          recModeHint.textContent = `TMDB 还没给这一季的播出日：照样每天 ${fTime.value || '19:00'} 到点守候，出种就下，保存后会自动补上日期。`;
         }
         planHint.textContent = (day && !finishedRec
-          ? `从 ${longDay(recDate)} 起，每天 ${fTime.value || '20:00'} 到勾选站点搜资源`
-          : `每天 ${fTime.value || '20:00'} 到勾选站点搜资源（推荐日未知时按每天守候）`)
+          ? `从 ${longDay(recDate)} 起，每天 ${fTime.value || '19:00'} 到勾选站点搜资源`
+          : `每天 ${fTime.value || '19:00'} 到勾选站点搜资源（推荐日未知时按每天守候）`)
           + retryText + tail;
       } else {
         recModeHint.style.display = 'none';
@@ -1939,8 +2118,8 @@ export function mountUI(root, api, opts) {
       }
       sum.plan.textContent = recMode
         ? (finishedRec
-          ? `已完结，每天 ${fTime.value || '20:00'} 补没下到的集`
-          : `按推荐时间（${recDate ? shortDay(recDate) + ' 起' : '日期待补'}），每天 ${fTime.value || '20:00'}`)
+          ? `已完结，每天 ${fTime.value || '19:00'} 补没下到的集`
+          : `按推荐时间（${recDate ? shortDay(recDate) + ' 起' : '日期待补'}），每天 ${fTime.value || '19:00'}`)
         : scheduleText(mode, fTime.value, fWeekday.value, fInterval.value)
           + (retry && win ? `，没更新 ${retry} 分钟后再搜` : '');
       const a = numOrNull(fEpStart);
@@ -2085,7 +2264,7 @@ export function mountUI(root, api, opts) {
         qb_category: '',
         save_path: fSavePath.value.trim(),
         schedule_mode: segMode.get() === 'recommend' ? 'recommend' : 'weekly',
-        schedule_time: fTime.value || '20:00',
+        schedule_time: fTime.value || '19:00',
         schedule_weekday: fWeekday.value,
         schedule_interval: Number(fInterval.value) || 120,
         retry_interval: Number(fRetry.value) || 0,
