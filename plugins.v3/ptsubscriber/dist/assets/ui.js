@@ -1,5 +1,5 @@
 /* PtSubscriber 插件页面：原生 DOM，无构建工具，宿主注入的 api 负责鉴权。 */
-const UI_VERSION = '1.4.3';
+const UI_VERSION = '1.5.0';
 const CSS = `
 .pts-root,.pts-ov,.pts-libpop{--acc:#8b5cf6;--acc2:#a78bfa;--sur:#ffffff;--sur2:#f7f7fb;--sur3:#eeeef6;--on:#1f2230;--muted:rgba(31,34,48,.58);--line:rgba(17,24,39,.1);--soft:rgba(139,92,246,.12);--danger:#dc2626;--ok:#16a34a;--warn:#b45309}
 .pts-dark{--sur:#1b1e26;--sur2:#232733;--sur3:#2b3040;--on:#e9ebf2;--muted:rgba(233,235,242,.6);--line:rgba(255,255,255,.12);--soft:rgba(139,92,246,.22);--danger:#f87171;--ok:#4ade80;--warn:#fbbf24}
@@ -789,8 +789,11 @@ function isDark() {
 }
 
 export function mountUI(root, api, opts) {
-  // wall：侧栏入口用的「任务墙」视图，只渲染订阅任务面板，不带 tabbar/找资源/运行记录
+  // wall：侧栏「定时订阅下载」入口，只渲染任务墙
+  // search：侧栏「找资源」入口，独立一页，只渲染找资源面板（不用先选订阅）
+  // 两者都不带 tabbar —— 找资源现在有自己的侧栏入口，页面里再放一个纯属重复
   const wallOnly = !!(opts && opts.mode === 'wall');
+  const searchOnly = !!(opts && opts.mode === 'search');
   root.innerHTML = '';
   root.classList.add('pts-root');
   root.classList.toggle('pts-dark', isDark());
@@ -800,23 +803,27 @@ export function mountUI(root, api, opts) {
 
   const state = {
     options: null, subs: [], logs: [], hits: [],
-    result: null, selected: new Set(), probe: null, tab: 'subs', prefix: null,
+    result: null, selected: new Set(), probe: null,
+    tab: searchOnly ? 'search' : 'subs', prefix: null,
     searchedMeta: null,   // 找资源页：搜索时 TMDB 认准的作品（用于给结果标注是否对得上）
     onlyMatch: false,     // 找资源页：只显示真正对得上认准作品的那些
   };
   let activeOverlay = null;
 
-  const tabs = [['subs', '订阅任务'], ['search', '找资源'], ['logs', '运行记录']];
+  // 找资源从「插件页里的一个 tab」搬到侧栏独立入口，所以页面里只剩订阅任务和运行记录
+  const tabs = [['subs', '订阅任务'], ['logs', '运行记录']];
   const panels = {};
 
   const head = el('div', 'pts-head');
   const logo = el('div', 'pts-logo');
-  logo.append(iconEl('bolt', 20));
+  logo.append(iconEl(searchOnly ? 'search' : 'bolt', 20));
   const headMid = el('div', 'pts-head-mid');
-  headMid.append(el('h2', '', '定时订阅下载'),
-    el('p', '', wallOnly
-      ? '任务墙 · 按 TMDB 推荐更新时间到指定站点搜资源'
-      : '按 TMDB 推荐更新时间到指定站点搜资源，也可自己定每天/每周几点'));
+  headMid.append(el('h2', '', searchOnly ? '找资源' : '定时订阅下载'),
+    el('p', '', searchOnly
+      ? '到站点找资源 · 搜到勾选就能下，不用先建任务'
+      : (wallOnly
+        ? '任务墙 · 按 TMDB 推荐更新时间到指定站点搜资源'
+        : '按 TMDB 推荐更新时间到指定站点搜资源，也可自己定每天/每周几点')));
   // 版本角标：界面长得不对时先看这里，确认浏览器是不是还在用旧缓存
   const verTag = el('span', 'pts-ver', 'v' + UI_VERSION);
   verTag.title = '界面版本；如果不是最新版，按 Ctrl+F5 强制刷新';
@@ -830,10 +837,10 @@ export function mountUI(root, api, opts) {
   root.append(head);
 
   let tabbar = null;
-  if (wallOnly) {
-    // 侧栏任务墙：只建订阅面板，省掉 tabbar / 找资源 / 运行记录
+  if (wallOnly || searchOnly) {
+    // 侧栏全页入口：一个页面只放一块面板（任务墙 / 找资源），省掉 tabbar
     const p = el('div', 'pts-panel active');
-    panels.subs = p;
+    if (searchOnly) panels.search = p; else panels.subs = p;
     root.append(p);
   } else {
     tabbar = el('div', 'pts-tabs');
@@ -899,6 +906,9 @@ export function mountUI(root, api, opts) {
     throw lastErr || new Error('插件接口不可用');
   }
 
+  // 首块面板：任务墙/订阅页是 subs，找资源独立页是 search
+  const homePanel = () => panels.subs || panels.search;
+
   async function boot() {
     try {
       if (!state.prefix) {
@@ -912,30 +922,33 @@ export function mountUI(root, api, opts) {
         try { state.probe = unwrap(await client.get(state.prefix + 'probe')); } catch (_) { /* 忽略 */ }
       }
       if (!state.prefix) {
-        panels.subs.innerHTML = '';
-        banner(panels.subs, '插件接口未就绪：请确认插件已启用，并在 MoviePilot 里重新打开本页。', 'bad');
+        homePanel().innerHTML = '';
+        banner(homePanel(), '插件接口未就绪：请确认插件已启用，并在 MoviePilot 里重新打开本页。', 'bad');
         return;
       }
-      const [options, subs, logs] = await Promise.all([
-        call('GET', 'options'), call('GET', 'subs'), call('GET', 'logs'),
-      ]);
-      state.options = options;
-      state.subs = subs.items || [];
-      state.logs = logs.logs || [];
-      state.hits = logs.hits || [];
+      // 找资源页只要站点/下载器配置，订阅和日志都不需要（少两次查询）
+      if (searchOnly) {
+        state.options = await call('GET', 'options');
+      } else {
+        const [options, subs, logs] = await Promise.all([
+          call('GET', 'options'), call('GET', 'subs'), call('GET', 'logs'),
+        ]);
+        state.options = options;
+        state.subs = subs.items || [];
+        state.logs = logs.logs || [];
+        state.hits = logs.hits || [];
+      }
       renderAll();
     } catch (err) {
-      panels.subs.innerHTML = '';
-      banner(panels.subs, '加载失败：' + (err && err.message ? err.message : String(err)), 'bad');
+      homePanel().innerHTML = '';
+      banner(homePanel(), '加载失败：' + (err && err.message ? err.message : String(err)), 'bad');
     }
   }
 
   function renderAll() {
+    if (searchOnly) { renderSearch(panels.search); return; }
     renderSubs();
-    if (!wallOnly) {
-      renderSearch();
-      renderLogs();
-    }
+    if (!wallOnly) renderLogs();
   }
 
   async function reloadSubs() {
@@ -945,6 +958,8 @@ export function mountUI(root, api, opts) {
   }
 
   async function reloadAll() {
+    // 找资源独立页不重画自己：刚搜出来的列表不能因为下完一条就被清掉
+    if (searchOnly) return;
     const [subs, logs] = await Promise.all([call('GET', 'subs'), call('GET', 'logs')]);
     state.subs = subs.items || [];
     state.logs = logs.logs || [];
@@ -1234,16 +1249,13 @@ export function mountUI(root, api, opts) {
       }
     }, '');
     syncMeta.title = '按剧名到 TMDB 查海报、年份和总集数；已有海报的会跳过，同时刷新一次媒体库入库状态';
-    // 找资源：和「同步海报」并排的常驻入口。选一条任务会自动带上它的关键词、
-    // 站点和下载器，搜到勾选就能下；不选任务也能当临时搜索用。
-    const quickSearch = button('找资源', () => openQuickSearch(null), '');
-    quickSearch.prepend(iconEl('search', 15));
-    quickSearch.title = '到站点找资源：选一条任务就自动带上它的站点和下载器，搜到直接下';
     // 从 MP 导入：MP 里已订阅的复制过来（可顺手删掉 MP 那条），省得两边各填一遍
     const importMp = button('从 MP 导入', () => openMpImport(), '');
     importMp.prepend(iconEl('importIn', 15));
     importMp.title = '读取 MoviePilot 自带的订阅，一键复制成插件任务，并可同时删除 MP 里那条';
-    bar.append(add, importMp, syncMeta, quickSearch, el('span', 'pts-muted',
+    // 「找资源」不放这里了：它在左侧导航栏有独立入口（#/plugin-app/PtSubscriber/search），
+    // 页面里再放一个按钮就是两个一样的入口
+    bar.append(add, importMp, syncMeta, el('span', 'pts-muted',
       `${state.subs.length} 个任务 · 站点 ${probe.site_count ?? (state.options.sites || []).length} 个`
       + ` · 下载器 ${(state.options.downloaders || []).length} 个`
       + ` · 调度器${probe.scheduler_running ? '运行中' : '未运行'}`));
@@ -1568,202 +1580,6 @@ export function mountUI(root, api, opts) {
     }
     card.addEventListener('click', () => openForm(sub));
     return card;
-  }
-
-  // -------------------------------------------------------- 找资源（卡片快捷）
-  /* 卡片上一键进去搜这部：预填剧名、勾好这条订阅的站点和下载器，搜到直接挑一条下。
-     省掉「进插件 → 切找资源 → 重输名字 → 重勾站点」这一串，左侧任务墙也能直接用。
-     只搜不下，不改动订阅的补搜进度，纯粹是「手动补一枪」。 */
-  function openQuickSearch(sub) {
-    if (activeOverlay) { activeOverlay.remove(); activeOverlay = null; }
-    const ov = el('div', 'pts-ov' + (root.classList.contains('pts-dark') ? ' pts-dark' : ''));
-    const form = el('div', 'pts-form pts-qsearch');
-
-    const head = el('div', 'pts-form-head');
-    const mid = el('div', 'mid');
-    // 工具条进来的没带订阅：默认取第一条任务（十有八九就是想给某条任务补一枪），
-    // 顶部还能换成别的任务，或者选「不选任务」当纯临时搜索用。
-    const subs = state.subs || [];
-    let cur = sub || (subs.length ? subs[0] : null);
-    const keywordOf = (s) => (s && (s.meta_title || s.name)) || '';
-    const titleEl = el('div', 'pts-form-title', '找资源' + (cur && cur.name ? ' · ' + cur.name : ''));
-    const subEl = el('div', 'pts-form-sub', '');
-    mid.append(titleEl, subEl);
-    const btnClose = el('button', 'pts-icon-btn');
-    btnClose.type = 'button';
-    btnClose.title = '关闭';
-    btnClose.append(iconEl('close', 16));
-    head.append(mid, btnClose);
-    form.append(head);
-
-    const body = el('div', 'pts-form-body');
-    const main = el('div', 'pts-qmain');
-    body.append(main);
-    form.append(body);
-
-    const fKeyword = textInput(keywordOf(cur), 'text', '剧名 / 关键词');
-    const dlOptions = [{ value: '', label: 'MP 默认下载器' }].concat(
-      (state.options.downloaders || []).map((d) => ({ value: d.name, label: d.name })));
-    const fDownloader = select(dlOptions, (cur && cur.downloader_id) || '');
-    const fSavePath = textInput((cur && cur.save_path) || '', 'text', '留空用下载器默认目录');
-
-    // 先选「给哪条任务找」：选完关键词/站点/下载器一起自动填好，少点三下手
-    const fSub = select([{ value: '', label: '不选任务（自己填关键词）' }].concat(
-      subs.map((s) => ({ value: s.id, label: s.name + (s.kind === 'movie' ? '（电影）' : '') }))),
-    cur ? cur.id : '');
-    const subRow = field('搜索哪条任务', fSub,
-      '选一条任务会自动带上它的关键词、站点和下载器；只搜不下，不影响这条任务的自动补搜进度');
-    subRow.style.marginBottom = '12px';
-    main.append(subRow);
-
-    const g = el('div', 'pts-grid3');
-    g.append(field('关键词', fKeyword), field('下载器', fDownloader), field('保存目录', fSavePath));
-    main.append(g);
-
-    const sites = state.options.sites || [];
-    const chosen = new Set(Array.isArray(cur && cur.site_ids) ? cur.site_ids : []);
-    const pickerWrap = el('div', 'pts-f');
-    pickerWrap.style.marginTop = '12px';
-    pickerWrap.append(el('span', '', '搜索站点'));
-    const picker = sitePicker(sites, chosen);
-    pickerWrap.append(picker.node);
-    main.append(pickerWrap);
-
-    const bar = el('div', 'pts-qbar');
-    const status = el('span', 'pts-qstatus',
-      chosen.size ? `已预选订阅的 ${chosen.size} 个站点` : '请至少勾一个站点');
-    const results = el('div', 'pts-qresults');
-    const selected = new Set();
-    let token = null;
-    let lastItems = [];
-
-    // 切换任务：整套预填换过来，上一部的结果清掉（换片了，别拿别的资源下错）
-    function applySub(s) {
-      fKeyword.value = keywordOf(s);
-      fDownloader.value = (s && s.downloader_id) || '';
-      fSavePath.value = (s && s.save_path) || '';
-      picker.set(Array.isArray(s && s.site_ids) ? s.site_ids : []);
-      titleEl.textContent = '找资源' + (s && s.name ? ' · ' + s.name : '');
-      const n = picker.get().length;
-      subEl.textContent = s
-        ? `预填了「${keywordOf(s)}」和这条任务的 ${n} 个站点；搜到勾选就能下，不影响自动补搜进度`
-        : '没选任务：自己填关键词、勾站点就行，纯粹临时下一枪';
-      status.textContent = n ? `已预选 ${n} 个站点` : '请至少勾一个站点';
-      token = null;
-      selected.clear();
-      results.innerHTML = '';
-    }
-    fSub.addEventListener('change', () => {
-      cur = subs.find((s) => String(s.id) === String(fSub.value)) || null;
-      applySub(cur);
-    });
-
-    function qCard(item) {
-      const c = el('div', 'pts-card main');
-      const cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.disabled = !!item.reason;
-      cb.addEventListener('change', () => (cb.checked ? selected.add(item.key) : selected.delete(item.key)));
-      const m = el('div', 'pts-main');
-      m.append(el('div', 'pts-title', item.display_title || item.title || '（无标题）'));
-      if (item.display_subtitle) m.append(el('div', 'pts-sub', item.display_subtitle));
-      const badges = el('div', 'pts-badges');
-      for (const b of item.badges || []) badges.append(el('span', 'pts-badge', b));
-      if (item.reason) badges.append(el('span', 'pts-badge warn', item.reason));
-      else badges.append(el('span', 'pts-badge ok', '符合规则'));
-      if (badges.childNodes.length) m.append(badges);
-      const meta = el('div', 'pts-meta');
-      meta.append(el('span', '', item.site || ''), el('span', '', fmtSize(item.size_gb)),
-        el('span', '', '做种 ' + (item.seeders ?? '—')),
-        el('span', '', '完成 ' + (item.grabs ?? '—')),
-        el('span', '', item.pubdate || ''));
-      m.append(meta);
-      if (item.page_url) {
-        const a = el('a', 'pts-sub', '详情页');
-        a.href = item.page_url;
-        a.target = '_blank';
-        a.rel = 'noopener noreferrer';
-        a.style.color = 'var(--acc)';
-        m.append(a);
-      }
-      c.append(cb, m);
-      return c;
-    }
-
-    function drawList(items) {
-      lastItems = items;
-      results.innerHTML = '';
-      if (!items.length) {
-        results.append(el('div', 'pts-qempty', '没有搜到资源。可换个关键词，或确认站点已启用且有搜索索引。'));
-        return;
-      }
-      const grid = el('div', 'pts-grid');
-      for (const it of items) grid.append(qCard(it));
-      results.append(grid);
-    }
-
-    const btnSearch = button('', async () => {
-      const domains = picker.get();
-      if (!domains.length) { status.textContent = '请至少勾选一个站点'; return; }
-      const kw = fKeyword.value.trim();
-      if (!kw) { status.textContent = '先填个关键词'; return; }
-      btnSearch.disabled = true;
-      status.textContent = '正在到站点搜索…';
-      results.innerHTML = '';
-      try {
-        const r = await call('POST', 'search', { keyword: kw, domains, preview: true });
-        if (!r.ok) { status.textContent = r.message || '搜索失败'; return; }
-        token = r.token;
-        selected.clear();
-        status.textContent = `共 ${(r.items || []).length} 条，符合规则 ${r.passed ?? 0} 条`;
-        drawList(r.items || []);
-      } catch (e) {
-        status.textContent = String(e && e.message ? e.message : e);
-      } finally { btnSearch.disabled = false; }
-    }, 'primary');
-    btnSearch.append(iconEl('search', 15), el('span', '', '搜索资源'));
-
-    const btnDownload = button('', async () => {
-      if (!token || !selected.size) { status.textContent = '先搜出来、勾选资源再下'; return; }
-      const keys = Array.from(selected);
-      const titles = {};
-      for (const it of lastItems) titles[it.key] = it.display_title || it.title;
-      btnDownload.disabled = true;
-      try {
-        const r = await call('POST', 'download', {
-          token, keys, titles,
-          downloader: fDownloader.value, category: '', save_path: fSavePath.value.trim(),
-          // 带上任务身份：命中记录和 QQ 通知里能看出这是给哪部下单的
-          sub: keywordOf(cur), sub_id: (cur && cur.id) || '',
-        });
-        const ok = (r.results || []).filter((x) => x.ok).length;
-        status.textContent = r.ok ? `已提交 ${ok}/${keys.length} 条到下载器` : (r.message || '提交失败');
-        if (r.ok) await reloadAll();
-      } catch (e) {
-        status.textContent = String(e && e.message ? e.message : e);
-      } finally { btnDownload.disabled = false; }
-    }, 'primary');
-    btnDownload.append(iconEl('download', 15), el('span', '', '下载选中'));
-
-    bar.append(btnSearch, btnDownload, status);
-    main.append(bar, results);
-    // 初始文案也跟着当前选中的任务走（选「不选任务」时提示自己填关键词）
-    applySub(cur);
-
-    const onKey = (e) => { if (e.key === 'Escape') close(); };
-    function close() {
-      document.removeEventListener('keydown', onKey);
-      if (activeOverlay === ov) activeOverlay = null;
-      ov.remove();
-    }
-    btnClose.addEventListener('click', close);
-    ov.addEventListener('click', (e) => { if (e.target === ov) close(); });
-    document.addEventListener('keydown', onKey);
-
-    ov.append(form);
-    activeOverlay = ov;
-    document.body.append(ov);
-    fKeyword.focus();
   }
 
   // -------------------------------------------------------------- 订阅表单
@@ -2545,15 +2361,18 @@ export function mountUI(root, api, opts) {
   }
 
   // -------------------------------------------------------------- 找资源
-  function renderSearch() {
-    const p = panels.search;
+  function renderSearch(container) {
+    // 找资源是左侧导航栏的独立一页，容器由 mountUI 传进来（以前是插件页里的一个 tab）
+    const p = container || panels.search;
+    if (!p) return;
     p.innerHTML = '';
     if (!state.options) return;
 
     const card = el('div', 'pts-sec');
     const h = el('div', 'pts-sec-h');
-    h.append(el('h4', '', '临时搜索下载'));
-    card.append(h, el('div', 'pts-sec-desc', '不建订阅也能用：填关键词（会先到 TMDB 认准是哪个作品）、勾站点，搜到直接挑一个提交到下载器'));
+    h.append(el('h4', '', '搜站点资源'));
+    card.append(h, el('div', 'pts-sec-desc',
+      '填关键词（会先到 TMDB 认准是哪个作品）、勾站点，搜到直接挑一条提交到下载器；不建订阅，也不影响任何任务的补搜进度'));
 
     const g = el('div', 'pts-grid3');
     const fKeyword = textInput('', 'text', '剧名 / 关键词（会先到 TMDB 认一下作品）');
@@ -2631,8 +2450,9 @@ export function mountUI(root, api, opts) {
           token: state.result.token, keys, titles,
           downloader: fDownloader.value, category: '',
           save_path: fSavePath.value.trim(),
-          // 带上订阅身份：命中记录和 QQ 通知里能看出这是给哪部下单的
-          sub: (sub && sub.name) || '', sub_id: (sub && sub.id) || '',
+          // 找资源页不绑订阅，带 TMDB 认准的片名下去，命中记录和 QQ 通知里能看出下的是哪部
+          sub: (state.searchedMeta && state.searchedMeta.title) || fKeyword.value.trim() || '',
+          sub_id: '',
         });
         const ok = (r.results || []).filter((x) => x.ok).length;
         status.textContent = r.ok ? `已提交 ${ok}/${keys.length} 条` : (r.message || '提交失败');

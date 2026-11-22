@@ -259,7 +259,7 @@ def _name_tier(core: str, title: str) -> int:
 class PtSubscriber(_PluginBase):
     plugin_name = "定时订阅下载"
     plugin_desc = "默认按 TMDB 推荐更新时间自动到指定站点搜资源（也可自选每天/每周指定星期几点），按详细规则下载到指定容器；自动对接 TMDB，按片名、年份、剧集/电影、集数逐项比对，只把真正这部排在最前，并把每集播出日列成表；读媒体库只补没入库的集，已下过的（含删掉的）不重下。聊天入口不用打斜杠，一条说全最省事：「订阅 天下第一 观众 1080P 周一5:30」（片名/站点/清晰度/周期顺序随意）；也可以只发「订阅 天才女友」先列同名作品，回序号后再选「从第几集 / 哪些站 / 多久刷一次」，回「确定」立刻补搜并把能下的资源列出来让你挑；「查资源 仙逆 馒头 1080P」只搜一轮直接下，不建订阅。斜杠命令 /ptsub、/ptfind、/ptlist 一样可用；回复全是纯文本不带图。"
-    plugin_version = "1.10.18"
+    plugin_version = "1.10.19"
     plugin_author = "wzy"
     plugin_config_prefix = "ptsubscriber_"
     plugin_order = 90
@@ -398,7 +398,11 @@ class PtSubscriber(_PluginBase):
         return "vue", "dist/assets"
 
     def get_sidebar_nav(self) -> List[Dict[str, Any]]:
-        """把订阅任务墙挂到 MoviePilot 主界面左侧导航，点开即是任务墙快速视图。"""
+        """左侧导航两个入口：任务墙 + 找资源。
+
+        找资源以前是插件页里的一个 tab，和工具条按钮重复；现在独立成一页，
+        nav_key=search 进去只渲染搜索面板（前端的 AppPage 按 navKey 分支）。
+        """
         if not self.get_state():
             return []
         return [
@@ -409,7 +413,15 @@ class PtSubscriber(_PluginBase):
                 "section": "subscribe",
                 "permission": "subscribe",
                 "order": 20,
-            }
+            },
+            {
+                "nav_key": "search",
+                "title": "找资源",
+                "icon": "mdi-magnify",
+                "section": "subscribe",
+                "permission": "subscribe",
+                "order": 21,
+            },
         ]
 
     def get_form(self) -> Tuple[Optional[List[dict]], Dict[str, Any]]:
