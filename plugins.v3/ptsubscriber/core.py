@@ -165,16 +165,17 @@ class Store:
                 return
 
     def migrate_evening_default(self) -> int:
-        """把早期默认的「每天 03:00」换成 19:00。
+        """把插件老默认的执行时间统一搬到 19:00。
 
-        TMDB 只给「哪天」播出，真正出种基本在当晚 19 点前后；03:00 是插件早期的默认值，
-        留着会让订阅比首播晚半天、错过免费种子的窗口。
-        只改等于 03:00 的记录（那是老默认值），用户自己改成别的时间点一律不动。
+        TMDB 只给「哪天」播出，真正出种基本在当晚 19 点前后：03:00 是插件最早的默认值，
+        20:00 是上一版的默认值，两个都留着会比首播出种晚、错过免费种子的窗口。
+        只改「等于某个老默认值」的记录（说明用户没自己调过），自己定过时间点的一律不动。
         """
+        old_defaults = {"03:00", "20:00"}
         items = self.subs()
         changed = 0
         for sub in items:
-            if str(sub.get("schedule_time") or "") != "03:00":
+            if str(sub.get("schedule_time") or "").strip() not in old_defaults:
                 continue
             sub["schedule_time"] = "19:00"
             changed += 1

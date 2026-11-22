@@ -258,7 +258,7 @@ def _name_tier(core: str, title: str) -> int:
 class PtSubscriber(_PluginBase):
     plugin_name = "定时订阅下载"
     plugin_desc = "默认按 TMDB 推荐更新时间自动到指定站点搜资源（也可自选每天/每周指定星期几点），按详细规则下载到指定容器；自动对接 TMDB，按片名、年份、剧集/电影、集数逐项比对，只把真正这部排在最前，并把每集播出日列成表；读媒体库只补没入库的集，已下过的（含删掉的）不重下。聊天入口不用打斜杠，一条说全最省事：「订阅 天下第一 观众 1080P 周一5:30」（片名/站点/清晰度/周期顺序随意）；也可以只发「订阅 天才女友」先列同名作品，回序号后再选「从第几集 / 哪些站 / 多久刷一次」，回「确定」立刻补搜并把能下的资源列出来让你挑；「查资源 仙逆 馒头 1080P」只搜一轮直接下，不建订阅。斜杠命令 /ptsub、/ptfind、/ptlist 一样可用；回复全是纯文本不带图。"
-    plugin_version = "1.10.14"
+    plugin_version = "1.10.15"
     plugin_author = "wzy"
     plugin_config_prefix = "ptsubscriber_"
     plugin_order = 90
@@ -286,11 +286,11 @@ class PtSubscriber(_PluginBase):
         self._max_results = max(10, min(200, int(cfg.get("max_results") or 50)))
         self.store = Store(PluginDataBackend(self))
         self.bridge = MPBridge(logger)
-        # 老订阅的「每天 03:00」是插件早期默认值，换成晚上 19:00（自己定过时间的模式不动）
+        # 老订阅里插件早/上一版默认的 03:00、20:00 统一搬到晚上 19:00（自己定过时间的模式不动）
         try:
             fixed = self.store.migrate_evening_default()
             if fixed:
-                logger.info(f"[{self.plugin_name}] {fixed} 条订阅的默认执行时间由 03:00 改为 19:00")
+                logger.info(f"[{self.plugin_name}] {fixed} 条订阅的默认执行时间统一改为 19:00")
         except Exception as exc:  # noqa: BLE001 - 迁移失败不影响启动
             logger.debug(f"[{self.plugin_name}] 执行时间迁移跳过：{type(exc).__name__}: {exc}")
         # 「每天」是老默认值，现在默认是「按 TMDB 推荐时间」，顺手把老订阅搬过去
