@@ -1,5 +1,5 @@
 /* PtSubscriber 插件页面：原生 DOM，无构建工具，宿主注入的 api 负责鉴权。 */
-const UI_VERSION = '1.4.2';
+const UI_VERSION = '1.4.3';
 const CSS = `
 .pts-root,.pts-ov,.pts-libpop{--acc:#8b5cf6;--acc2:#a78bfa;--sur:#ffffff;--sur2:#f7f7fb;--sur3:#eeeef6;--on:#1f2230;--muted:rgba(31,34,48,.58);--line:rgba(17,24,39,.1);--soft:rgba(139,92,246,.12);--danger:#dc2626;--ok:#16a34a;--warn:#b45309}
 .pts-dark{--sur:#1b1e26;--sur2:#232733;--sur3:#2b3040;--on:#e9ebf2;--muted:rgba(233,235,242,.6);--line:rgba(255,255,255,.12);--soft:rgba(139,92,246,.22);--danger:#f87171;--ok:#4ade80;--warn:#fbbf24}
@@ -59,7 +59,7 @@ const CSS = `
 .pts-veil{position:absolute;left:0;right:0;bottom:0;height:64%;background:linear-gradient(to top,rgba(8,10,16,.93),rgba(8,10,16,.55) 48%,rgba(8,10,16,0));pointer-events:none}
 .pts-ptop{position:absolute;left:0;right:0;bottom:0;padding:0 10px 9px;display:flex;flex-direction:column;gap:4px;line-height:1.3}
 .pts-pname{min-width:0;font-size:14.2px;font-weight:720;color:#fff;text-shadow:0 1px 8px rgba(0,0,0,.75);word-break:break-word;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.pts-pmeta{display:flex;align-items:center;gap:6px;font-size:11px}
+.pts-pmeta{display:flex;align-items:center;flex-wrap:wrap;gap:4px 6px;font-size:11px;max-width:100%}
 .pts-year{font-weight:700;color:rgba(255,255,255,.84);font-variant-numeric:tabular-nums;flex:none}
 .pts-sbadge{font-size:10.4px;font-weight:750;color:#fff;background:rgba(255,255,255,.2);border-radius:5px;padding:1px 5px;flex:none;letter-spacing:.3px;backdrop-filter:blur(3px)}
 .pts-sbadge.off{background:rgba(255,255,255,.14);color:rgba(255,255,255,.78)}
