@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
@@ -403,26 +404,139 @@ def air_dates(tmdb_id: int, season: int | None = None) -> dict:
     }
 
 
-def library_movie(tmdb_id: int) -> bool:
+@contextlib.contextmanager
+def _db():
+    """借一个 MoviePilot 的数据库会话，用完关掉。
+
+    MP 的 ``get_db()`` 是生成器，只 ``next()`` 一下不关会把连接一直占着；
+    入库巡检每几分钟就跑一轮，不关迟早把连接池吃干，所以统一走这个上下文。
+    """
+    from app.db import get_db
+
+    gen = get_db()
+    try:
+        yield next(gen)
+    finally:
+        try:
+            gen.close()          # 触发 get_db 的 finally: db.close()
+        except Exception:
+            pass
+
+
+def _lib_rows(tmdb_id: int) -> list:
+    """按 tmdb id 取 MediaServerItem 记录，兼容几种不同的落库姿势。
+
+    新版 MP 用 ``media_source + media_id``（"themoviedb" / "12345"），老版本或
+    别的媒体服务器插件可能写成 ``tmdb:12345`` 前缀，或者只填了 ``tmdbid`` 列。
+    按顺序试，取到就不再往下试；全都不通就返回空。
+    """
+    from app.db import models as M
+    from sqlalchemy import or_
+
+    tid = int(tmdb_id)
+    src = or_(M.MediaServerItem.media_source == "themoviedb",
+              M.MediaServerItem.media_source == "tmdb")
+    with _db() as db:
+        rows = db.query(M.MediaServerItem).filter(
+            src, M.MediaServerItem.media_id == str(tid)).all()
+        if rows:
+            return rows
+        try:
+            rows = db.query(M.MediaServerItem).filter(
+                src, M.MediaServerItem.media_id.in_([f"tmdb:{tid}", f"themoviedb:{tid}"])).all()
+        except Exception:
+            rows = []
+        if rows:
+            return rows
+        try:
+            col = getattr(M.MediaServerItem, "tmdbid", None)
+            if col is None:
+                return []
+            return db.query(M.MediaServerItem).filter(col == tid).all() or []
+        except Exception:
+            return []
+
+
+def _movie_transferred(tmdb_id: int) -> bool:
+    """下载完成并成功转移过的电影（TransferHistory 里有没有这条）。
+
+    媒体库（MediaServerItem）要等 MP 定时同步媒体服务器才有记录，刚刮削完那段时间
+    查不到——用户就会看到「媒体库明明有了，卡片还写没下载」。转移历史在转移成功时
+    立刻落库，先用它兜底，等媒体库同步过来再自然接上。
+    读不到数据库时直接抛给调用方区分「没入库」和「没读上」。
+    """
+    from app.db import models as M
+    from sqlalchemy import or_
+
+    with _db() as db:
+        rows = db.query(M.TransferHistory).filter(
+            or_(M.TransferHistory.media_source == "themoviedb",
+                M.TransferHistory.media_source == "tmdb"),
+            M.TransferHistory.media_id == str(int(tmdb_id))).all()
+    # 转移历史里剧集和电影的 tmdb id 是两套编号，理论上不会撞；能拿到 type 就再确认一次
+    for row in rows or []:
+        kind = str(getattr(row, "type", "") or "")
+        if not kind or kind == "电影":
+            return True
+    return False
+
+
+def _movie_same_name(year: Any, title: str) -> bool:
+    """媒体库里没按 tmdb 编号查到这部电影时，按「片名 + 年份」再认一次。
+
+    飞牛 / Emby 那边自己刮削出来的条目，tmdb 编号可能和订阅用的对不上（剧场版、
+    同名前传最容易），只按 ID 查就会一直显示「还没入库」。电影里同名片同年的撞车
+    很少，这里只认 item_type=movie、片名骨架完全相等，年份都有时还要年份一致。
+    """
+    name = _norm_title(title)
+    if not name:
+        return False
+    from app.db import models as M
+
+    with _db() as db:
+        q = db.query(M.MediaServerItem)
+        try:
+            q = q.filter(M.MediaServerItem.item_type == "movie")
+        except Exception:
+            pass
+        rows = q.filter(M.MediaServerItem.title.contains(str(title).strip())).all()
+    want_year = str(year or "").strip()
+    for row in rows or []:
+        if _norm_title(getattr(row, "title", "")) != name:
+            continue
+        got_year = str(getattr(row, "year", "") or "").strip()
+        if want_year and got_year and got_year != want_year:
+            continue
+        return True
+    return False
+
+
+def library_movie(tmdb_id: int, title: str = "", year: Any = "") -> bool | None:
     """电影订阅是不是已经入库了。
 
     电影没有季集概念，``seasoninfo`` 是空的，按集数解析永远得 0 —— 所以不能复用
-    ``library_eps``：只要 MediaServerItem 里有这条 tmdb_id 的记录，就算已入库。
+    ``library_eps``：只要媒体库里有这条 tmdb_id 的记录，就算已入库。
+    媒体库记录还没同步过来时，用「转移成功」兜底；编号对不上时按「片名 + 年份」再认一次，
+    别让卡片一直停在「还没下载」。
     """
-    try:
-        from app.db import get_db
-        from app.db import models as M
-        from sqlalchemy import or_
-
-        db = next(get_db())
-        row = db.query(M.MediaServerItem).filter(
-            or_(M.MediaServerItem.media_source == "themoviedb",
-                M.MediaServerItem.media_source == "tmdb"),
-            M.MediaServerItem.media_id == str(int(tmdb_id))).first()
-        return bool(row)
-    except Exception as exc:
-        logger.debug(f"[PtSubscriber] 媒体库读电影失败：{type(exc).__name__}: {str(exc)[:120]}")
+    if not tmdb_id:
         return False
+    # 三种来源依次试：媒体库编号 → 转移历史 → 片名+年份。
+    # 全都没查上（数据库不可用）时返回 None，让调用方保持原状态，别把「已入库」误判成没入库。
+    unknown = False
+    checks = (
+        ("媒体库", lambda: bool(_lib_rows(tmdb_id))),
+        ("转移历史", lambda: _movie_transferred(int(tmdb_id))),
+        ("片名年份", lambda: _movie_same_name(year, title)),
+    )
+    for label, probe in checks:
+        try:
+            if probe():
+                return True
+        except Exception as exc:
+            unknown = True
+            logger.debug(f"[PtSubscriber] {label}读电影失败：{type(exc).__name__}: {str(exc)[:120]}")
+    return None if unknown else False
 
 
 def library_eps(tmdb_id: int, season: int | None = None) -> list[int]:
@@ -432,15 +546,7 @@ def library_eps(tmdb_id: int, season: int | None = None) -> list[int]:
     已入库的集数直接视为已下过，订阅只补缺失的。查不到就返回空，不影响订阅。
     """
     try:
-        from app.db import get_db
-        from app.db import models as M
-        from sqlalchemy import or_
-
-        db = next(get_db())
-        rows = db.query(M.MediaServerItem).filter(
-            or_(M.MediaServerItem.media_source == "themoviedb",
-                M.MediaServerItem.media_source == "tmdb"),
-            M.MediaServerItem.media_id == str(int(tmdb_id))).all()
+        rows = _lib_rows(int(tmdb_id))
     except Exception as exc:
         logger.debug(f"[PtSubscriber] 媒体库读取失败：{type(exc).__name__}: {str(exc)[:120]}")
         return []
@@ -475,12 +581,11 @@ def _history_eps(model_name: str, tmdb_id: int, season: int | None = None) -> li
     查不到就返回空，不影响订阅。
     """
     try:
-        from app.db import get_db
         from app.db import models as M
 
         model = getattr(M, model_name)
-        db = next(get_db())
-        rows = db.query(model).filter(model.media_id == str(int(tmdb_id))).all()
+        with _db() as db:
+            rows = db.query(model).filter(model.media_id == str(int(tmdb_id))).all()
     except Exception as exc:
         logger.debug(f"[PtSubscriber] {model_name} 读取失败：{type(exc).__name__}: {str(exc)[:120]}")
         return []

@@ -259,7 +259,7 @@ def _name_tier(core: str, title: str) -> int:
 class PtSubscriber(_PluginBase):
     plugin_name = "定时订阅下载"
     plugin_desc = "默认按 TMDB 推荐更新时间自动到指定站点搜资源（也可自选每天/每周指定星期几点），按详细规则下载到指定容器；自动对接 TMDB，按片名、年份、剧集/电影、集数逐项比对，只把真正这部排在最前，并把每集播出日列成表；读媒体库只补没入库的集，已下过的（含删掉的）不重下。聊天入口不用打斜杠，一条说全最省事：「订阅 天下第一 观众 1080P 周一5:30」（片名/站点/清晰度/周期顺序随意）；也可以只发「订阅 天才女友」先列同名作品，回序号后再选「从第几集 / 哪些站 / 多久刷一次」，回「确定」立刻补搜并把能下的资源列出来让你挑；「查资源 仙逆 馒头 1080P」只搜一轮直接下，不建订阅。斜杠命令 /ptsub、/ptfind、/ptlist 一样可用；回复全是纯文本不带图。"
-    plugin_version = "1.10.16"
+    plugin_version = "1.10.17"
     plugin_author = "wzy"
     plugin_config_prefix = "ptsubscriber_"
     plugin_order = 90
@@ -325,6 +325,9 @@ class PtSubscriber(_PluginBase):
             logger.info(f"[{self.plugin_name}] 已启动，{len(self._scheduler.get_jobs())} 条订阅计划")
             # 关机/断网/重启会丢掉到点的计划：开机 75 秒后先扫一遍补上，之后每 30 分钟巡检
             self._install_catchup_jobs()
+            # 入库状态也要自己跟上：下载完 → 转移 → 媒体库同步有十几分钟延迟，
+            # 界面不能等用户手动点「同步海报」才刷新
+            self._install_lib_job()
         except Exception as exc:
             logger.error(f"[{self.plugin_name}] 调度器启动失败：{type(exc).__name__}: {exc}")
             self._scheduler = None
@@ -649,7 +652,8 @@ class PtSubscriber(_PluginBase):
         昨天及更早播的照旧算数，所以关机错过的集第二天开机仍会补。
         """
         if (sub.get("kind") or "series") == "movie":
-            return not bool(sub.get("delivered_eps"))
+            # 已入库的电影没必要再补：补了也是立刻跳过，白留一条记录
+            return not bool(sub.get("delivered_eps")) and not bool(sub.get("lib_in"))
         if next_episode(sub) is None:
             return False  # 区间内已经补齐
         if not (sub.get("ep_start") or sub.get("ep_end")):
@@ -754,6 +758,93 @@ class PtSubscriber(_PluginBase):
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[{self.plugin_name}] 补跑排队失败：{type(exc).__name__}: {exc}")
 
+    # --------------------------------------------- 入库状态：媒体库 / 转移历史
+    LIB_SYNC_MINUTES = 5   # 常驻巡检间隔：只查本地库，不发网络请求，5 分钟一次很轻
+
+    def _sync_library(self, sub: dict) -> bool:
+        """把一条订阅的「入库状态」对齐媒体库与转移历史，有变化才写盘。
+
+        电影只看「媒体库里有没有这部」（没有记录时用转移成功兜底），剧集补已入库集数，
+        并把「下到过」的集并进台账——删掉看过的集也不会被当成缺失重下。
+        返回是否真的改动了数据，给定时巡检用来判断要不要记日志。
+        """
+        sid = str(sub.get("id") or "")
+        try:
+            tmdb_id = int(sub.get("tmdb_id") or 0)
+        except (TypeError, ValueError):
+            return False
+        if not sid or not tmdb_id:
+            return False
+        changed = False
+        if (sub.get("kind") or "series") == "movie":
+            # 电影没有集数：只判「媒体库里有没有这条」，有就算已入库。
+            # 返回 None 表示数据库这一轮没读上（MP 刚启动/库被锁），保持原状态别误判成没入库
+            now_in = meta_library_movie(tmdb_id, sub.get("meta_title") or sub.get("name") or "",
+                                        sub.get("year") or "")
+            if now_in is None:
+                return False
+            now_in = bool(now_in)
+            if now_in != bool(sub.get("lib_in")) or not sub.get("lib_synced"):
+                self.store.set_sub_fields(sid, lib_in=now_in, lib_synced=True)
+                changed = True
+            return changed
+        season = sub.get("season")
+        lib = sorted({int(x) for x in (meta_library_eps(tmdb_id, season) or [])})
+        before = sorted({int(x) for x in (sub.get("library_eps") or [])})
+        if lib != before or not sub.get("lib_synced"):
+            self.store.set_sub_fields(sid, library_eps=lib, lib_synced=True)
+            changed = True
+        hist = meta_transferred_eps(tmdb_id, season) or []
+        dl = meta_downloaded_eps(tmdb_id, season) or []
+        done = {int(x) for x in (sub.get("delivered_eps") or [])}
+        add = sorted({*lib, *hist, *dl} - done)
+        if add:
+            self.store.mark_delivered(sid, add)
+            changed = True
+        return changed
+
+    def _sync_libraries(self, note: str = "") -> int:
+        """把所有订阅的入库状态对齐一次（含停用的：停用了也可能已经入库）。
+
+        下载完成 → 做种 → 转移 → 媒体服务器同步，这一串走完 MP 才写进媒体库表，
+        中间十几二十分钟很常见。界面不能等用户手动点「同步海报」才更新，所以常驻
+        一个小时轻量巡检；只查本地数据库，不碰站点和下载器。
+        """
+        changed = 0
+        for sub in self.store.subs():
+            try:
+                if self._sync_library(sub):
+                    changed += 1
+            except Exception as exc:  # noqa: BLE001 - 单条读不到不影响其它
+                logger.debug(f"[{self.plugin_name}] 入库状态刷新失败"
+                             f"（{sub.get('name')}）：{type(exc).__name__}: {exc}")
+        if changed:
+            logger.info(f"[{self.plugin_name}] 入库状态刷新{note}：{changed} 条订阅已更新")
+        return changed
+
+    def _install_lib_job(self) -> None:
+        """装常驻巡检：启动 40 秒后先跑一遍，之后每 5 分钟一次。"""
+        if not self._scheduler:
+            return
+        from datetime import timedelta
+
+        from apscheduler.triggers.interval import IntervalTrigger
+
+        try:
+            self._scheduler.add_job(
+                self._sync_libraries, "date",
+                run_date=self._now_dt() + timedelta(seconds=40),
+                id="libsync:boot", name="入库状态：开机对齐",
+                replace_existing=True, max_instances=1,
+            )
+            self._scheduler.add_job(
+                self._sync_libraries, IntervalTrigger(minutes=self.LIB_SYNC_MINUTES, timezone=TZ),
+                id="libsync:watch", name="入库状态：定时巡检",
+                replace_existing=True, max_instances=1, coalesce=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - 装不上就只靠手动同步
+            logger.warning(f"[{self.plugin_name}] 入库状态巡检注册失败：{type(exc).__name__}: {exc}")
+
     def _downloader_ready(self, sub: dict) -> tuple[bool, str]:
         """补跑前先确认下载器实例在（刚开机时 qb / transmission 可能还没就绪）。
 
@@ -836,20 +927,7 @@ class PtSubscriber(_PluginBase):
         # 否则「看完删了的集」会被当成缺失反复重下（用户反馈过的严重问题）。
         if sub.get("tmdb_id"):
             try:
-                tmdb_id = int(sub["tmdb_id"])
-                if is_movie:
-                    # 电影没有集数：只判「媒体库里有没有这条」，有就算已入库
-                    self.store.set_sub_fields(
-                        sid, lib_in=bool(meta_library_movie(tmdb_id)), lib_synced=True)
-                else:
-                    season = sub.get("season")
-                    lib = meta_library_eps(tmdb_id, season) or []
-                    hist = meta_transferred_eps(tmdb_id, season) or []
-                    dl = meta_downloaded_eps(tmdb_id, season) or []
-                    self.store.set_sub_fields(sid, library_eps=lib, lib_synced=True)
-                    delivered = sorted({*lib, *hist, *dl})
-                    if delivered:
-                        self.store.mark_delivered(sid, delivered)
+                self._sync_library(sub)
                 sub = self.store.get_sub(sid) or sub
             except Exception as exc:  # noqa: BLE001 - 媒体库/历史读不到不影响补搜
                 logger.debug(f"[{self.plugin_name}] 补搜前读媒体库/转移历史失败：{type(exc).__name__}: {exc}")
@@ -868,6 +946,15 @@ class PtSubscriber(_PluginBase):
         }
         if not domains:
             entry.update(status="skipped", message="未勾选站点")
+            self._finish(sub, entry)
+            return
+        # 电影已经入库了就别再搜一遍：媒体库里有、下载器里还留着种子，很容易又下一遍。
+        # 想换版本时用顶部「找资源」手动挑一条，比让计划任务盲搜更准。
+        if is_movie and sub.get("lib_in"):
+            self._retry_state.pop(sid, None)
+            self._cancel_retry(sid)
+            entry.update(status="skipped",
+                         message="媒体库里已经有这部电影，不再重复下载（想换版本用「找资源」手动挑一条）")
             self._finish(sub, entry)
             return
         if one_by_one and target is None:
@@ -1290,7 +1377,11 @@ class PtSubscriber(_PluginBase):
                 "delivered_eps": sorted({*lib, *hist, *dl})}
 
     def api_meta_refresh(self, payload: dict = Body(default={})) -> dict:
-        """给所有订阅补/刷新 TMDB 海报与总集数；force=True 时连已有的也重查。"""
+        """给所有订阅补/刷新 TMDB 海报与总集数；force=True 时连已有的也重查。
+
+        顺手把「媒体库入库状态」也对齐一次：海报和入库是一件事的两半，
+        用户点一次同步，看到的卡片就该是最新的（哪些已入库、哪些还没入库）。
+        """
         force = bool((payload or {}).get("force"))
         updated = 0
         failed: list[str] = []
@@ -1305,9 +1396,13 @@ class PtSubscriber(_PluginBase):
                 updated += 1
             else:
                 failed.append(str(item.get("name") or ""))
+        lib_changed = self._sync_libraries("（手动同步）")
         tail = (f"，{len(failed)} 条没认出来：{'、'.join(failed[:5])}" if failed else "")
-        return {"ok": True, "updated": updated, "failed": failed,
-                "message": f"已更新 {updated} 条海报" + tail}
+        msg = f"已更新 {updated} 条海报"
+        if lib_changed:
+            msg += f"，入库状态刷新 {lib_changed} 条"
+        return {"ok": True, "updated": updated, "failed": failed, "lib_changed": lib_changed,
+                "message": msg + tail}
 
     # -------------------------------------------------- MP 自带订阅（导入 / 删除）
     # 用户原话：「mp 里面订阅了的弄一个可以复制到插件里面的，然后删除 mp 里面订阅的，这样方便点」。
