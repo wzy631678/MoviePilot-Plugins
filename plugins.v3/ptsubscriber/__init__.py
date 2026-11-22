@@ -668,7 +668,15 @@ class PtSubscriber(_PluginBase):
         return max(aired) > high
 
     def _catch_up_scan(self, boot: bool = False) -> None:
-        """扫一遍有没有「计划时间过了却没跑」的订阅，有就排队补跑。"""
+        """扫一遍有没有「该跑没跑 / 跑了没下到」的订阅，有就排队补跑。
+
+        两条触发路径：
+          ① 计划时间已过，而那个时间点之后一条运行记录都没有（关机、断网、
+             重启把 cron 丢了）——属于真·错过，立刻补；
+          ② 那个时间点跑过，但确实还有「已播出没下到」的集，且距上次已经
+             超过 2 小时（站点晚上才上资源、断网重试窗口过了才恢复）——补一次，
+             同一天最多 3 次，避免站点一直没资源时整天狂搜。
+        """
         if not self._scheduler:
             return
         now = self._now_dt()
@@ -690,12 +698,14 @@ class PtSubscriber(_PluginBase):
             if created and created > due:
                 continue  # 建订阅之前的时间点，不算错过
             if last_at and last_at >= due:
-                # 这个时间点跑过（或刚补过）：只有「确实还差集 + 隔了很久」才再补。
-                # 上一轮是 error（多半是断网、站点连不上）就放宽：20 分钟后再试，
-                # 且不占用每日次数，网络恢复后能自己接上，不用等一整天。
+                # 这个时间点跑过：只有「确实还差集 + 隔了很久」才再补。
+                # 上一轮是 error（多半是断网、站点连不上）就放宽到 20 分钟后再试，
+                # 且不占每日次数，网络恢复后能自己接上，不用等一整天。
+                #
+                # 注意这里不再区分「开机那一次」：插件会被 MP 反复重载，重载会把
+                # 30 分钟的巡检计时重置掉，只靠巡检很可能一直轮不到；而这条分支
+                # 已经有「间隔 + 每日 3 次 + 确实有已播未下的集」三重限制，安全。
                 status = str(last.get("status") or "")
-                if boot and status != "error":
-                    continue
                 gap = 1200 if status == "error" else self.CATCHUP_GAP
                 if (now - last_at).total_seconds() < gap:
                     continue
