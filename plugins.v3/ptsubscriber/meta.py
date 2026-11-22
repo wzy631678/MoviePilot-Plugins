@@ -403,6 +403,28 @@ def air_dates(tmdb_id: int, season: int | None = None) -> dict:
     }
 
 
+def library_movie(tmdb_id: int) -> bool:
+    """电影订阅是不是已经入库了。
+
+    电影没有季集概念，``seasoninfo`` 是空的，按集数解析永远得 0 —— 所以不能复用
+    ``library_eps``：只要 MediaServerItem 里有这条 tmdb_id 的记录，就算已入库。
+    """
+    try:
+        from app.db import get_db
+        from app.db import models as M
+        from sqlalchemy import or_
+
+        db = next(get_db())
+        row = db.query(M.MediaServerItem).filter(
+            or_(M.MediaServerItem.media_source == "themoviedb",
+                M.MediaServerItem.media_source == "tmdb"),
+            M.MediaServerItem.media_id == str(int(tmdb_id))).first()
+        return bool(row)
+    except Exception as exc:
+        logger.debug(f"[PtSubscriber] 媒体库读电影失败：{type(exc).__name__}: {str(exc)[:120]}")
+        return False
+
+
 def library_eps(tmdb_id: int, season: int | None = None) -> list[int]:
     """查 MoviePilot 媒体库（MediaServerItem 表）里已入库的集数。
 

@@ -64,6 +64,8 @@ class Store:
             body["delivered_eps"] = old.get("delivered_eps") or []
         if old and "library_eps" not in payload:
             body["library_eps"] = old.get("library_eps") or []
+        if old and "lib_in" not in payload:
+            body["lib_in"] = bool(old.get("lib_in"))
         if old and "recommend_date" not in payload:
             body["recommend_date"] = old.get("recommend_date") or ""
         if old and "air_state" not in payload:
@@ -276,6 +278,8 @@ class Store:
             sub["library_eps"] = lib
             sub["lib_count"] = len(lib)
             sub["lib_synced"] = bool(sub.get("lib_synced"))
+            # 电影没有集数：lib_in = 媒体库里有没有这部（前端据此显示「已入库」）
+            sub["lib_in"] = bool(sub.get("lib_in"))
             sub["total_eps"] = int(sub.get("total_eps") or 0) or int(sub.get("ep_end") or 0)
             # 任务墙上的「3/36」：区间内已下 / 区间总集数（不是整季 200 集）。
             # 用户订阅 165-200，分母就该是 36，这样卡片和表单里的数字才对得上。

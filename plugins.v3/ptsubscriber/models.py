@@ -28,6 +28,8 @@ class SubscriptionIn(BaseModel):
     delivered_eps: list[int] = Field(default_factory=list)
     # 媒体库当前已入库集数缓存（卡片显示用；删掉的集不在里面，但台账仍保留，不回头重下）
     library_eps: list[int] = Field(default_factory=list)
+    # 电影专用：媒体库里有没有这部（电影没有季集，不能数集数，只能判存在）
+    lib_in: bool = False
     rules: RuleSet = Field(default_factory=RuleSet)
     downloader_id: str = ""
     qb_category: str = ""

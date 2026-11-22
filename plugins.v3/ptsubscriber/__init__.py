@@ -30,6 +30,7 @@ from .meta import search as search_meta
 from .meta import search_fast as search_meta_fast
 from .meta import air_dates as meta_air_dates
 from .meta import library_eps as meta_library_eps
+from .meta import library_movie as meta_library_movie
 from .meta import transferred_eps as meta_transferred_eps
 from .meta import downloaded_eps as meta_downloaded_eps
 from .models import (
@@ -258,7 +259,7 @@ def _name_tier(core: str, title: str) -> int:
 class PtSubscriber(_PluginBase):
     plugin_name = "定时订阅下载"
     plugin_desc = "默认按 TMDB 推荐更新时间自动到指定站点搜资源（也可自选每天/每周指定星期几点），按详细规则下载到指定容器；自动对接 TMDB，按片名、年份、剧集/电影、集数逐项比对，只把真正这部排在最前，并把每集播出日列成表；读媒体库只补没入库的集，已下过的（含删掉的）不重下。聊天入口不用打斜杠，一条说全最省事：「订阅 天下第一 观众 1080P 周一5:30」（片名/站点/清晰度/周期顺序随意）；也可以只发「订阅 天才女友」先列同名作品，回序号后再选「从第几集 / 哪些站 / 多久刷一次」，回「确定」立刻补搜并把能下的资源列出来让你挑；「查资源 仙逆 馒头 1080P」只搜一轮直接下，不建订阅。斜杠命令 /ptsub、/ptfind、/ptlist 一样可用；回复全是纯文本不带图。"
-    plugin_version = "1.10.15"
+    plugin_version = "1.10.16"
     plugin_author = "wzy"
     plugin_config_prefix = "ptsubscriber_"
     plugin_order = 90
@@ -833,17 +834,22 @@ class PtSubscriber(_PluginBase):
         #   ② 下载/转移历史（transferred_eps）——下到过、后来看完删掉的也在里面。
         # 只查媒体库是不够的：用户删掉的集不在库里，但转移历史记得住，
         # 否则「看完删了的集」会被当成缺失反复重下（用户反馈过的严重问题）。
-        if not is_movie and sub.get("tmdb_id"):
+        if sub.get("tmdb_id"):
             try:
                 tmdb_id = int(sub["tmdb_id"])
-                season = sub.get("season")
-                lib = meta_library_eps(tmdb_id, season) or []
-                hist = meta_transferred_eps(tmdb_id, season) or []
-                dl = meta_downloaded_eps(tmdb_id, season) or []
-                self.store.set_sub_fields(sid, library_eps=lib, lib_synced=True)
-                delivered = sorted({*lib, *hist, *dl})
-                if delivered:
-                    self.store.mark_delivered(sid, delivered)
+                if is_movie:
+                    # 电影没有集数：只判「媒体库里有没有这条」，有就算已入库
+                    self.store.set_sub_fields(
+                        sid, lib_in=bool(meta_library_movie(tmdb_id)), lib_synced=True)
+                else:
+                    season = sub.get("season")
+                    lib = meta_library_eps(tmdb_id, season) or []
+                    hist = meta_transferred_eps(tmdb_id, season) or []
+                    dl = meta_downloaded_eps(tmdb_id, season) or []
+                    self.store.set_sub_fields(sid, library_eps=lib, lib_synced=True)
+                    delivered = sorted({*lib, *hist, *dl})
+                    if delivered:
+                        self.store.mark_delivered(sid, delivered)
                 sub = self.store.get_sub(sid) or sub
             except Exception as exc:  # noqa: BLE001 - 媒体库/历史读不到不影响补搜
                 logger.debug(f"[{self.plugin_name}] 补搜前读媒体库/转移历史失败：{type(exc).__name__}: {exc}")
@@ -1064,7 +1070,13 @@ class PtSubscriber(_PluginBase):
         from datetime import datetime as _dt
         try:
             lib: list[int] = []
-            if sub.get("tmdb_id") and (sub.get("kind") or "series") != "movie":
+            if sub.get("tmdb_id") and (sub.get("kind") or "series") == "movie":
+                # 电影只看媒体库有没有这条记录（没有季集可数）
+                self.store.set_sub_fields(
+                    sid, lib_in=bool(meta_library_movie(int(sub["tmdb_id"]))),
+                    lib_synced=True,
+                    lib_at=_dt.now().strftime("%Y-%m-%d %H:%M:%S"))
+            elif sub.get("tmdb_id"):
                 tmdb_id = int(sub["tmdb_id"])
                 season = sub.get("season")
                 lib = meta_library_eps(tmdb_id, season) or []
@@ -1707,13 +1719,28 @@ class PtSubscriber(_PluginBase):
                 str(data.get("downloader") or ""), str(data.get("category") or ""),
                 str(data.get("save_path") or ""),
             )
+            # 手动下载也要留痕 + 推通知：用户反馈过「找资源里下完了，QQ 一点动静没有」
+            titles = data.get("titles") or {}
+            src = str(data.get("sub") or "").strip() or "手动下载"
+            accepted = []
             for row in result.get("results", []):
-                if row.get("ok"):
-                    self.store.add_hit({
-                        "sub_id": "", "sub": "手动下载", "dedup_key": row["key"],
-                        "title": data.get("titles", {}).get(row["key"], row["key"]),
-                        "downloader": result.get("downloader"), "status": "submitted",
-                    })
+                if not row.get("ok"):
+                    continue
+                title = titles.get(row["key"]) or row["key"]
+                accepted.append(title)
+                self.store.add_hit({
+                    "sub_id": str(data.get("sub_id") or ""), "sub": src,
+                    "dedup_key": row["key"], "title": title,
+                    "downloader": result.get("downloader"), "status": "submitted",
+                })
+            if accepted:
+                lines = [f"来源：{src}",
+                         f"下载器：{result.get('downloader') or '默认'}"]
+                for title in accepted[:3]:
+                    lines.append(f"资源：{title}")
+                if len(accepted) > 3:
+                    lines.append(f"……共 {len(accepted)} 条")
+                self._notify(f"✅ 已提交下载｜{src} {len(accepted)} 条", "\n".join(lines))
             return result
         except Exception as exc:
             return {"ok": False, "message": f"{type(exc).__name__}: {str(exc)[:200]}"}

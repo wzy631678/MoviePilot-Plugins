@@ -1,5 +1,5 @@
 /* PtSubscriber 插件页面：原生 DOM，无构建工具，宿主注入的 api 负责鉴权。 */
-const UI_VERSION = '1.4.0';
+const UI_VERSION = '1.4.1';
 const CSS = `
 .pts-root,.pts-ov,.pts-libpop{--acc:#8b5cf6;--acc2:#a78bfa;--sur:#ffffff;--sur2:#f7f7fb;--sur3:#eeeef6;--on:#1f2230;--muted:rgba(31,34,48,.58);--line:rgba(17,24,39,.1);--soft:rgba(139,92,246,.12);--danger:#dc2626;--ok:#16a34a;--warn:#b45309}
 .pts-dark{--sur:#1b1e26;--sur2:#232733;--sur3:#2b3040;--on:#e9ebf2;--muted:rgba(233,235,242,.6);--line:rgba(255,255,255,.12);--soft:rgba(139,92,246,.22);--danger:#f87171;--ok:#4ade80;--warn:#fbbf24}
@@ -227,6 +227,14 @@ const CSS = `
 .pts-table tbody tr:hover{background:var(--sur2)}
 .pts-tablewrap{border:1px solid var(--line);border-radius:14px;overflow-x:auto;overflow-y:hidden;background:var(--sur);margin-bottom:18px}
 .pts-tablewrap .pts-table{min-width:100%}
+/* 运行记录：时间压短、长文案限宽换行、提交数用数字强调，扫一眼就能看出「哪条真下了」 */
+.pts-lgbar{display:flex;align-items:center;gap:8px;margin:-4px 0 14px}
+.pts-lg-time{white-space:nowrap;font-variant-numeric:tabular-nums;color:var(--muted);font-size:11.6px}
+.pts-lg-sub{font-weight:650;color:var(--on);display:inline-block;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}
+.pts-lg-msg{display:inline-block;max-width:430px;line-height:1.55;color:var(--muted);word-break:break-word}
+.pts-lg-num{white-space:nowrap;font-variant-numeric:tabular-nums;color:var(--muted);font-size:11.8px}
+.pts-lg-num b{font-size:13px;font-weight:750;color:var(--acc);margin-right:1px}
+.pts-lg-num.zero b{color:var(--muted);font-weight:500;font-size:11.8px}
 .pts-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(348px,1fr));gap:12px}
 .pts-group{grid-column:1/-1;display:flex;align-items:center;gap:9px;margin:6px 0 -4px;font-size:12px;font-weight:600;color:var(--muted);letter-spacing:.2px}
 .pts-group::after{content:'';flex:1;height:1px;background:var(--line)}
@@ -1383,6 +1391,13 @@ export function mountUI(root, api, opts) {
     if (libDocOff) { document.removeEventListener('click', libDocOff); libDocOff = null; }
   }
   function libTag(sub) {
+    // 电影没有集数可数，只看媒体库里有没有这部
+    if (sub.kind === 'movie') {
+      if (!sub.lib_in) return null;
+      const mtag = el('span', 'pts-libtag', '已入库');
+      mtag.title = '媒体库里已经有这部电影了';
+      return mtag;
+    }
     const eps = Array.isArray(sub.library_eps)
       ? sub.library_eps.slice().sort((a, b) => a - b) : [];
     const n = Number(sub.lib_count) || eps.length || 0;
@@ -1465,7 +1480,8 @@ export function mountUI(root, api, opts) {
     const lib = Number(sub.lib_count || 0) || (sub.library_eps ? sub.library_eps.length : 0);
     const high = Number(sub.high_ep || 0);
     if (sub.kind === 'movie') {
-      prog.append(el('b', '', done ? '已下载' : '电影'));
+      // 电影只有「入了没入」两种状态：入库了就直接写在主数字上，别只留个「电影」
+      prog.append(el('b', '', sub.lib_in ? '已入库' : (done ? '已下载' : '电影')));
     } else if (scTotal) {
       prog.append(el('b', '', '已下 ' + scDone + ' 集'));
     } else {
@@ -1496,7 +1512,20 @@ export function mountUI(root, api, opts) {
 
     // 第二行小字：订阅区间 + 一共几集 + 还差几集（+ 媒体库已入库几集）。
     // 用户说过「外面的数字要和里面填的对得上」，所以区间直接摊开写，不缩成 3/36。
-    if (sub.kind !== 'movie' && scTotal) {
+    if (sub.kind === 'movie') {
+      // 电影只有「入了没入」两种状态：主数字已经写了「已入库」，这行只补一句说明，别重复
+      bodyEl.style.paddingBottom = '3px';
+      const info = el('div', 'pts-psub');
+      if (sub.lib_in) {
+        info.append(el('span', 'pts-libtag', '媒体库已刮削'));
+        info.title = '媒体库里已经有这部电影了';
+      } else {
+        info.append(el('span', '', done ? '下载器已收 · 等待转移入库' : '还没下载'));
+        info.title = done ? '下载器已收，等 MP 刮削转移进媒体库'
+          : '还没搜到或还没提交，到点会自动去站点找';
+      }
+      card.append(info);
+    } else if (scTotal) {
       bodyEl.style.paddingBottom = '3px';
       const info = el('div', 'pts-psub');
       const left = `订阅第 ${scStart}~${scEnd} 集 · 共 ${scTotal} 集`
@@ -2536,6 +2565,8 @@ export function mountUI(root, api, opts) {
           token: state.result.token, keys, titles,
           downloader: fDownloader.value, category: '',
           save_path: fSavePath.value.trim(),
+          // 带上订阅身份：命中记录和 QQ 通知里能看出这是给哪部下单的
+          sub: (sub && sub.name) || '', sub_id: (sub && sub.id) || '',
         });
         const ok = (r.results || []).filter((x) => x.ok).length;
         status.textContent = r.ok ? `已提交 ${ok}/${keys.length} 条` : (r.message || '提交失败');
@@ -2700,6 +2731,34 @@ export function mountUI(root, api, opts) {
   }
 
   // -------------------------------------------------------------- 运行记录
+  // 记录页的筛选用模块级变量记住，刷新数据后不会跳回「全部」
+  let logFilter = 'all';
+  function shortTime(s) {
+    const t = String(s || '');
+    const m = t.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/);
+    if (!m) return t;
+    const now = new Date();
+    const ymd = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const hm = `${m[4]}:${m[5]}`;
+    if (`${m[1]}-${m[2]}-${m[3]}` === ymd) return '今天 ' + hm;
+    if (m[1] === String(now.getFullYear())) return `${m[2]}-${m[3]} ${hm}`;
+    return `${m[1]}-${m[2]}-${m[3]} ${hm}`;
+  }
+  function statusBadge(l) {
+    const st = String(l.status || '');
+    if (st === 'ok') return el('span', 'pts-badge ok', '成功');
+    if (st === 'waiting') return el('span', 'pts-badge mid', '等待更新');
+    if (st === 'error') return el('span', 'pts-badge warn', '出错');
+    return el('span', 'pts-badge', st || '—');
+  }
+  function hitCell(l) {
+    const found = Number(l.found || 0);
+    const sent = Number(l.submitted || 0);
+    const box = el('span', 'pts-lg-num' + (sent ? '' : ' zero'));
+    box.append(el('b', '', sent + ' 条'), el('span', '', ` · 命中 ${found}`));
+    box.title = `提交 ${sent} 条到下载器，本轮搜索命中 ${found} 条`;
+    return box;
+  }
   function renderLogs() {
     const p = panels.logs;
     p.innerHTML = '';
@@ -2727,22 +2786,71 @@ export function mountUI(root, api, opts) {
       `运行记录 ${state.logs.length} 条 · 已下载 ${state.hits.length} 条`));
     p.append(bar);
 
+    // 只看关心的那几条：有下载的 / 出错的，常态「没什么事」的记录一眼扫过就行
+    const logs = state.logs || [];
+    const nHit = logs.filter((l) => Number(l.submitted || 0) > 0).length;
+    const nErr = logs.filter((l) => l.status === 'error').length;
+    const seg = segmented([
+      { value: 'all', label: `全部 ${logs.length}` },
+      { value: 'hit', label: `有下载 ${nHit}` },
+      { value: 'err', label: `出错 ${nErr}` },
+    ], logFilter, () => { logFilter = seg.get(); renderLogs(); });
+    const lgbar = el('div', 'pts-lgbar');
+    lgbar.append(seg.node);
+    p.append(lgbar);
+
     p.append(sectionTitle('执行记录'));
-    if (!state.logs.length) {
-      p.append(el('div', 'pts-empty', '还没有执行记录。创建订阅并启用后，到点执行会在这里留痕。'));
+    const shown = logs.filter((l) => {
+      if (logFilter === 'hit') return Number(l.submitted || 0) > 0;
+      if (logFilter === 'err') return l.status === 'error';
+      return true;
+    }).slice(0, 60);
+    if (!shown.length) {
+      p.append(el('div', 'pts-empty', logs.length
+        ? '这个筛选下没有记录，换「全部」看看。'
+        : '还没有执行记录。创建订阅并启用后，到点执行会在这里留痕。'));
     } else {
-      p.append(table(['时间', '订阅', '补搜目标', '站点', '分辨率', '集数', '命中/提交', '结果'],
-        state.logs.slice(0, 60).map((l) => [l.at, l.sub, l.target || '', l.site || '',
-          l.resolution || '', l.episode || '',
-          `${l.found ?? 0} / ${l.submitted ?? 0}`, l.message || l.status])));
+      p.append(table(['时间', '订阅', '状态', '目标', '分辨率', '站点', '提交', '结果'],
+        shown.map((l) => {
+          const tAt = el('span', 'pts-lg-time', shortTime(l.at));
+          tAt.title = l.at || '';
+          const tSub = el('span', 'pts-lg-sub', l.sub || '—');
+          if (l.note) { tSub.title = l.note; }
+          const tMsg = el('span', 'pts-lg-msg', l.message || l.status || '');
+          if (l.message) tMsg.title = l.message;
+          return [
+            tAt,
+            tSub,
+            statusBadge(l),
+            l.target || '',
+            l.resolution || '',
+            l.site || '',
+            hitCell(l),
+            tMsg,
+          ];
+        })));
     }
+
     p.append(sectionTitle('已下载资源'));
     if (!state.hits.length) {
       p.append(el('div', 'pts-empty', '暂无已下载资源记录'));
     } else {
       p.append(table(['时间', '标题', '站点', '分辨率', '集数', '下载器', '来源'],
-        state.hits.slice(0, 80).map((h) => [h.at, h.title, h.site || '', h.resolution || '',
-          h.episode ? '第 ' + h.episode + ' 集' : '', h.downloader || '', h.sub || ''])));
+        state.hits.slice(0, 80).map((h) => {
+          const tAt = el('span', 'pts-lg-time', shortTime(h.at));
+          tAt.title = h.at || '';
+          const tTitle = el('span', 'pts-lg-msg', h.title || '');
+          if (h.title) tTitle.title = h.title;
+          return [
+            tAt,
+            tTitle,
+            h.site || '',
+            h.resolution || '',
+            h.episode ? '第 ' + h.episode + ' 集' : '',
+            h.downloader || '',
+            h.sub || '',
+          ];
+        })));
     }
   }
 
@@ -2757,7 +2865,13 @@ export function mountUI(root, api, opts) {
     const tbody = el('tbody');
     for (const row of rows) {
       const tr = el('tr');
-      for (const v of row) tr.append(el('td', '', v === null || v === undefined ? '' : v));
+      for (const v of row) {
+        const td = el('td');
+        // 单元格允许直接放节点（状态徽标、带样式的数字），文本仍按原样写
+        if (v instanceof Node) td.append(v);
+        else td.textContent = (v === null || v === undefined) ? '' : String(v);
+        tr.append(td);
+      }
       tbody.append(tr);
     }
     t.append(tbody);
