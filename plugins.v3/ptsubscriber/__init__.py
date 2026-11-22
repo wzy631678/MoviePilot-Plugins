@@ -258,7 +258,7 @@ def _name_tier(core: str, title: str) -> int:
 class PtSubscriber(_PluginBase):
     plugin_name = "定时订阅下载"
     plugin_desc = "默认按 TMDB 推荐更新时间自动到指定站点搜资源（也可自选每天/每周指定星期几点），按详细规则下载到指定容器；自动对接 TMDB，按片名、年份、剧集/电影、集数逐项比对，只把真正这部排在最前，并把每集播出日列成表；读媒体库只补没入库的集，已下过的（含删掉的）不重下。聊天入口不用打斜杠，一条说全最省事：「订阅 天下第一 观众 1080P 周一5:30」（片名/站点/清晰度/周期顺序随意）；也可以只发「订阅 天才女友」先列同名作品，回序号后再选「从第几集 / 哪些站 / 多久刷一次」，回「确定」立刻补搜并把能下的资源列出来让你挑；「查资源 仙逆 馒头 1080P」只搜一轮直接下，不建订阅。斜杠命令 /ptsub、/ptfind、/ptlist 一样可用；回复全是纯文本不带图。"
-    plugin_version = "1.10.12"
+    plugin_version = "1.10.13"
     plugin_author = "wzy"
     plugin_config_prefix = "ptsubscriber_"
     plugin_order = 90
@@ -1624,13 +1624,21 @@ class PtSubscriber(_PluginBase):
         return {"ok": bool(item), "message": "" if item else "订阅不存在"}
 
     def api_sub_run(self, payload: dict = Body(default={})) -> dict:
+        """立即试运行：放后台线程立即返回，避免同步搜索让前端超时误报失败。
+
+        之前这里同步调 _run_sub，站点多/搜索慢时请求可能几十秒，浏览器或
+        网关等不到响应就断开，页面提示「执行失败」，但服务端实际跑完并
+        提交成功（用户反馈：点立即执行提示失败，实际却下下去了）。
+        """
         sid = str((payload or {}).get("id") or "")
         sub = self.store.get_sub(sid)
         if not sub:
             return {"ok": False, "message": "订阅不存在"}
-        self._run_sub(sid, force=True)
+        if not self._start_sub_bg(sid):
+            return {"ok": True, "message": "该订阅已在执行中，稍候按订阅通知看结果"}
         logs = self.store.logs()
-        return {"ok": True, "last": logs[0] if logs else {},
+        return {"ok": True, "message": "已在后台执行一轮，完成后会按订阅通知发送结果",
+                "last": logs[0] if logs else {},
                 "item": next((s for s in self.store.public_subs() if s.get("id") == sid), {})}
 
     def api_sub_reset(self, payload: dict = Body(default={})) -> dict:
@@ -2438,23 +2446,37 @@ class PtSubscriber(_PluginBase):
         }
         return self._dl_text(self._pending_dl[key], key), True
 
+    def _start_sub_bg(self, sid: str) -> bool:
+        """启动后台补搜线程；同一订阅已在跑时返回 False（防重复点击）。
+
+        立即执行必须放后台：同步跑一轮含网络搜索（站点多时可能几十秒），
+        浏览器或网关等不到响应就断开，页面会误报「执行失败」，但服务端
+        实际跑完并提交成功（用户反馈：点立即执行提示失败，实际却下下去了）。
+        """
+        if not sid:
+            return False
+        name = f"ptsub-now-{sid}"
+        try:
+            for t in threading.enumerate():
+                if t.name == name and t.is_alive():
+                    return False
+
+            def worker() -> None:
+                try:
+                    self._run_sub(sid, force=True)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"[{self.plugin_name}] 立即执行失败：{type(exc).__name__}: {exc}")
+
+            threading.Thread(target=worker, name=name, daemon=True).start()
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[{self.plugin_name}] 立即执行启动失败：{type(exc).__name__}: {exc}")
+            return False
+
     def _run_sub_bg(self, sid: str) -> str:
         """立即执行放后台，先回执再搜，QQ 里不用干等一两分钟。"""
-        if not sid:
-            return ""
-
-        def worker() -> None:
-            try:
-                self._run_sub(sid, force=True)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(f"[{self.plugin_name}] 立即执行失败：{type(exc).__name__}: {exc}")
-
-        try:
-            import threading
-
-            threading.Thread(target=worker, name=f"ptsub-now-{sid}", daemon=True).start()
-        except Exception as exc:  # noqa: BLE001
-            return f"立即执行没启动起来：{type(exc).__name__}: {exc}"
+        if not self._start_sub_bg(sid):
+            return "该订阅已在执行中，稍等一下再看结果。"
         return "已在后台立即搜一轮，结果会按订阅通知再发你。"
 
     def _resolve_sites(self, words: List[str]) -> Tuple[List[str], List[str], List[str]]:

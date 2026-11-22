@@ -1260,7 +1260,7 @@ export function mountUI(root, api, opts) {
       await reloadAll();
       const last = r.last || {};
       alert(r.ok
-        ? (last.message || '已执行完成') + (last.target ? '\n本轮目标：' + last.target : '')
+        ? (r.message || last.message || '已执行完成')
         : '执行失败：' + (r.message || '未知错误'));
     } catch (e) {
       alert('执行失败：' + String(e && e.message ? e.message : e));
