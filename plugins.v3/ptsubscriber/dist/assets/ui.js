@@ -1,5 +1,5 @@
 /* PtSubscriber 插件页面：原生 DOM，无构建工具，宿主注入的 api 负责鉴权。 */
-const UI_VERSION = '1.5.0';
+const UI_VERSION = '1.5.1';
 const CSS = `
 .pts-root,.pts-ov,.pts-libpop{--acc:#8b5cf6;--acc2:#a78bfa;--sur:#ffffff;--sur2:#f7f7fb;--sur3:#eeeef6;--on:#1f2230;--muted:rgba(31,34,48,.58);--line:rgba(17,24,39,.1);--soft:rgba(139,92,246,.12);--danger:#dc2626;--ok:#16a34a;--warn:#b45309}
 .pts-dark{--sur:#1b1e26;--sur2:#232733;--sur3:#2b3040;--on:#e9ebf2;--muted:rgba(233,235,242,.6);--line:rgba(255,255,255,.12);--soft:rgba(139,92,246,.22);--danger:#f87171;--ok:#4ade80;--warn:#fbbf24}
@@ -833,7 +833,28 @@ export function mountUI(root, api, opts) {
   btnRefresh.title = '刷新';
   btnRefresh.append(iconEl('refresh', 16));
   btnRefresh.addEventListener('click', () => boot());
-  head.append(logo, headMid, btnRefresh);
+
+  // 兜底：如果 MP 前端没把 nav_key=search 那条挂到左侧导航（老版本只认第一个入口），
+  // 任务墙右上角留一个放大镜，点一下原地切到找资源页，功能不至于整个消失。
+  // 左侧已经有「找资源」入口时，这个按钮不额外占工具条，只在任务墙顶部出现一次。
+  function selfDispose() {
+    if (activeOverlay) activeOverlay.remove();
+    root.innerHTML = '';
+  }
+  let btnToSearch = null;
+  if (wallOnly) {
+    btnToSearch = el('button', 'pts-icon-btn');
+    btnToSearch.type = 'button';
+    btnToSearch.title = '找资源：到站点搜片，搜到直接下';
+    btnToSearch.append(iconEl('search', 16));
+    btnToSearch.addEventListener('click', () => {
+      selfDispose();
+      mountUI(root, api, { mode: 'search' });
+    });
+  }
+  head.append(logo, headMid);
+  if (btnToSearch) head.append(btnToSearch);
+  head.append(btnRefresh);
   root.append(head);
 
   let tabbar = null;
@@ -2766,8 +2787,5 @@ export function mountUI(root, api, opts) {
   }
 
   boot();
-  return () => {
-    if (activeOverlay) activeOverlay.remove();
-    root.innerHTML = '';
-  };
+  return selfDispose;
 }
