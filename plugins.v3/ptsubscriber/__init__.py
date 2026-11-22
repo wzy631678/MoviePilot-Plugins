@@ -115,6 +115,58 @@ def _recommend_start(sub: dict, tz: str):
         return None
 
 
+def _parse_dt(text, now):
+    """把 "2026-11-21 20:00:00" 这类本地时间串解析成带时区的 datetime；解析不了返回 None。"""
+    from datetime import datetime
+
+    raw = str(text or "").strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(raw, fmt).replace(tzinfo=now.tzinfo)
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
+_WEEKDAY_INDEX = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+
+
+def last_fire_time(sub: dict, now, last_at=None):
+    """这条订阅「最近一次本该执行」的时间点（<= now）。
+
+    用来判断开机时有没有错过计划：APScheduler 用的是内存调度器，NAS 关机、断网、
+    MP 重启期间到点的 cron 不会补跑，重启后从下一个计划时间才开始，
+    于是「昨晚该下的集」就彻底漏掉了。拿它和日志里的上次运行时间比对就能发现。
+    """
+    from datetime import timedelta
+
+    mode = sub.get("schedule_mode", "recommend")
+    if mode == "interval":
+        # 间隔模式没有固定时间点：上次跑过之后隔了一个间隔就该跑，超时即视为错过
+        base = last_at or _parse_dt(sub.get("created_at"), now)
+        if base is None:
+            return None
+        return base + timedelta(minutes=max(5, int(sub.get("schedule_interval") or 120)))
+    try:
+        hour, minute = (int(x) for x in str(sub.get("schedule_time") or "20:00").split(":"))
+    except (TypeError, ValueError):
+        hour, minute = 20, 0
+    fire = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if mode == "weekly":
+        key = str(sub.get("schedule_weekday") or "mon").lower()[:3]
+        fire -= timedelta(days=(fire.weekday() - _WEEKDAY_INDEX.get(key, 0)) % 7)
+        if fire > now:
+            fire -= timedelta(days=7)
+    elif fire > now:
+        fire -= timedelta(days=1)
+    # 注意：recommend 模式不看 recommend_date 这个锚点。
+    # 锚点取的是 TMDB 的「下一集播出日」，一旦台账落后（该下没下），锚点会被推到
+    # 更晚的那一集，照它判断就会认为「还没开始守候」而永远不补（《仙逆》真机案例：
+    # 已播到 168、水位 167，锚点却是 169 的 11-29）。有没有东西可补交给
+    # _need_catchup 按节目表判断，这里只给「最近该跑的时间」。
+    return fire
+
+
 def build_trigger(sub: dict, tz: str):
     from apscheduler.triggers.cron import CronTrigger
     from apscheduler.triggers.interval import IntervalTrigger
@@ -206,7 +258,7 @@ def _name_tier(core: str, title: str) -> int:
 class PtSubscriber(_PluginBase):
     plugin_name = "定时订阅下载"
     plugin_desc = "默认按 TMDB 推荐更新时间自动到指定站点搜资源（也可自选每天/每周指定星期几点），按详细规则下载到指定容器；自动对接 TMDB，按片名、年份、剧集/电影、集数逐项比对，只把真正这部排在最前，并把每集播出日列成表；读媒体库只补没入库的集，已下过的（含删掉的）不重下。聊天入口不用打斜杠，一条说全最省事：「订阅 天下第一 观众 1080P 周一5:30」（片名/站点/清晰度/周期顺序随意）；也可以只发「订阅 天才女友」先列同名作品，回序号后再选「从第几集 / 哪些站 / 多久刷一次」，回「确定」立刻补搜并把能下的资源列出来让你挑；「查资源 仙逆 馒头 1080P」只搜一轮直接下，不建订阅。斜杠命令 /ptsub、/ptfind、/ptlist 一样可用；回复全是纯文本不带图。"
-    plugin_version = "1.10.11"
+    plugin_version = "1.10.12"
     plugin_author = "wzy"
     plugin_config_prefix = "ptsubscriber_"
     plugin_order = 90
@@ -270,6 +322,8 @@ class PtSubscriber(_PluginBase):
             self._rebuild_jobs()
             self._scheduler.start()
             logger.info(f"[{self.plugin_name}] 已启动，{len(self._scheduler.get_jobs())} 条订阅计划")
+            # 关机/断网/重启会丢掉到点的计划：开机 75 秒后先扫一遍补上，之后每 30 分钟巡检
+            self._install_catchup_jobs()
         except Exception as exc:
             logger.error(f"[{self.plugin_name}] 调度器启动失败：{type(exc).__name__}: {exc}")
             self._scheduler = None
@@ -532,10 +586,170 @@ class PtSubscriber(_PluginBase):
             return f"排重试失败：{exc}"
         return f"{interval} 分钟后再搜（第 {state['tries']} 次重试，窗口共 {window} 分钟）"
 
-    def _run_sub(self, sid: str, force: bool = False) -> None:
+    # ------------------------------------------------- 错过的计划补跑
+    # APScheduler 内存调度器不补跑：NAS 关机 / 断网 / 容器重启期间到点的计划
+    # 就等于没跑过，重启后要从下一个计划时间才开始，昨晚该下的集就漏了。
+    # 所以开机后先扫一遍「计划时间已过 + 那之后没跑过 + 确实有已播未下的集」，
+    # 直接补跑；运行期间每 30 分钟再扫一次，网络恢复后几十分钟内就能补上。
+    CATCHUP_MAX = 3      # 同一天同一订阅最多自动补 3 次，避免整天狂搜站点
+    CATCHUP_GAP = 7200   # 跑过但没下到：至少隔 2 小时再补，不跟重试窗口打架
+
+    def _install_catchup_jobs(self) -> None:
+        """开机补偿（75 秒后，等 MP 站点/下载器就绪）+ 每 30 分钟巡检一次。"""
+        if not self._scheduler:
+            return
+        from datetime import timedelta
+
+        from apscheduler.triggers.interval import IntervalTrigger
+
+        try:
+            self._scheduler.add_job(
+                self._catch_up_scan, "date",
+                run_date=self._now_dt() + timedelta(seconds=75),
+                kwargs={"boot": True}, id="catchup:boot",
+                name="错过的计划：开机补跑", replace_existing=True, max_instances=1,
+            )
+            self._scheduler.add_job(
+                self._catch_up_scan, IntervalTrigger(minutes=30, timezone=TZ),
+                id="catchup:watch", name="错过的计划：定时巡检",
+                replace_existing=True, max_instances=1, coalesce=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - 装不上也不影响正常计划
+            logger.warning(f"[{self.plugin_name}] 补跑巡检注册失败：{type(exc).__name__}: {exc}")
+
+    def _catchup_state(self) -> dict:
+        try:
+            return dict(self.store.backend.load("catchup", {}) or {})
+        except Exception:
+            return {}
+
+    def _catchup_used(self, sid: str, day: str) -> int:
+        row = self._catchup_state().get(str(sid)) or {}
+        return int(row.get("n") or 0) if str(row.get("day") or "") == day else 0
+
+    def _catchup_mark(self, sid: str, day: str) -> None:
+        state = self._catchup_state()
+        row = state.get(str(sid)) or {}
+        n = (int(row.get("n") or 0) + 1) if str(row.get("day") or "") == day else 1
+        state[str(sid)] = {"day": day, "n": n}
+        try:
+            self.store.backend.save("catchup", state)
+        except Exception:
+            pass
+
+    def _need_catchup(self, sub: dict, now) -> bool:
+        """是不是真有「已经播出、但还没下到」的集？没有就别白搜一趟。
+
+        节目表（TMDB）说新集已经播了、而台账的最高水位还没到那集，才算漏了。
+        查不到节目表 / 没填 tmdb_id 时保守放行：宁可多搜一次，也别漏更新。
+        """
+        if (sub.get("kind") or "series") == "movie":
+            return not bool(sub.get("delivered_eps"))
+        if next_episode(sub) is None:
+            return False  # 区间内已经补齐
+        if not (sub.get("ep_start") or sub.get("ep_end")):
+            return True  # 补老剧（不逐集追更），有新资源就收
+        tmdb_id = sub.get("tmdb_id")
+        if not tmdb_id:
+            return True
+        try:
+            air = meta_air_dates(int(tmdb_id), sub.get("season")) or {}
+        except Exception as exc:  # noqa: BLE001 - 查不到就按计划跑一次
+            logger.debug(f"[{self.plugin_name}] 补跑查节目表失败：{type(exc).__name__}: {exc}")
+            return True
+        today = now.strftime("%Y-%m-%d")
+        eps = air.get("eps") or []
+        aired = [int(e.get("ep") or 0) for e in eps
+                 if e.get("ep") and e.get("air_date") and str(e["air_date"])[:10] <= today]
+        if not aired:
+            # 节目表有集数据但一集都还没播（新剧还没开播）→ 确实没得下，别白搜
+            return not eps
+        high = max((int(x) for x in (sub.get("delivered_eps") or [])), default=0)
+        return max(aired) > high
+
+    def _catch_up_scan(self, boot: bool = False) -> None:
+        """扫一遍有没有「计划时间过了却没跑」的订阅，有就排队补跑。"""
+        if not self._scheduler:
+            return
+        now = self._now_dt()
+        day = now.strftime("%Y-%m-%d")
+        runs = self.store.last_runs()
+        queued = 0
+        for sub in self.store.subs():
+            if not sub.get("enabled"):
+                continue
+            sid = str(sub.get("id") or "")
+            if not sid:
+                continue
+            last = runs.get(sid) or runs.get("name:" + str(sub.get("name") or "")) or {}
+            last_at = _parse_dt(last.get("at"), now)
+            due = last_fire_time(sub, now, last_at)
+            if due is None or now < due:
+                continue  # 还没到该跑的时间
+            created = _parse_dt(sub.get("created_at"), now)
+            if created and created > due:
+                continue  # 建订阅之前的时间点，不算错过
+            if last_at and last_at >= due:
+                # 这个时间点跑过（或刚补过）：只有「确实还差集 + 隔了很久」才再补。
+                # 上一轮是 error（多半是断网、站点连不上）就放宽：20 分钟后再试，
+                # 且不占用每日次数，网络恢复后能自己接上，不用等一整天。
+                status = str(last.get("status") or "")
+                if boot and status != "error":
+                    continue
+                gap = 1200 if status == "error" else self.CATCHUP_GAP
+                if (now - last_at).total_seconds() < gap:
+                    continue
+                if status != "error" and self._catchup_used(sid, day) >= self.CATCHUP_MAX:
+                    continue
+                if not self._need_catchup(sub, now):
+                    continue
+                if status != "error":
+                    self._catchup_mark(sid, day)
+            elif not self._need_catchup(sub, now):
+                continue
+            # 几条订阅错开几十秒，别同时打同一个站点
+            self._schedule_catchup(sid, 30 + queued * 20, "开机补偿" if boot else "补漏", 3)
+            queued += 1
+        if queued:
+            logger.info(f"[{self.plugin_name}] 有 {queued} 条订阅错过了计划时间，已排队补跑")
+
+    def _schedule_catchup(self, sid: str, delay: int, note: str, remaining: int) -> None:
+        if not self._scheduler:
+            return
+        from datetime import timedelta
+
+        try:
+            self._scheduler.add_job(
+                self._catch_up_run, "date",
+                run_date=self._now_dt() + timedelta(seconds=max(5, int(delay))),
+                args=[sid, note, int(remaining)],
+                id=f"catchup:{sid}", name=f"补跑：{note}",
+                replace_existing=True, max_instances=1,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[{self.plugin_name}] 补跑排队失败：{type(exc).__name__}: {exc}")
+
+    def _catch_up_run(self, sid: str, note: str = "补漏", remaining: int = 1) -> None:
+        """补跑一轮；关机几天积了好几集时，接着排下一轮（一次补一集）。"""
+        sub = self.store.get_sub(sid)
+        if not sub or not sub.get("enabled"):
+            return
+        before = {int(x) for x in (sub.get("delivered_eps") or [])}
+        logger.info(f"[{self.plugin_name}] {note}：{sub.get('name')} 立刻补跑一轮")
+        self._run_sub(sid, reason=note)
+        if remaining <= 1:
+            return
+        after_sub = self.store.get_sub(sid) or {}
+        after = {int(x) for x in (after_sub.get("delivered_eps") or [])}
+        # 追更一次只下一集，后面若还有已播未下的，间隔 2 分钟接着补（最多 3 集）
+        if after - before and self._need_catchup(after_sub, self._now_dt()):
+            self._schedule_catchup(sid, 120, note, remaining - 1)
+
+    def _run_sub(self, sid: str, force: bool = False, reason: str = "") -> None:
         """补搜一轮：只盯「下一个还没下到的集」，下到就记账，没下到就等重试。
 
         force=True 表示手动「立即执行」：即使订阅处于停用状态也照样跑一轮。
+        reason 非空表示这轮是「开机补偿 / 补漏」触发的，日志里会标出来。
         """
         sub = self.store.get_sub(sid)
         if not sub or (not sub.get("enabled") and not force):
@@ -568,6 +782,8 @@ class PtSubscriber(_PluginBase):
         target = next_episode(sub) if one_by_one else None
         entry: dict[str, Any] = {
             "sub_id": sid, "sub": sub.get("name"), "sites": len(domains), "keyword": keyword,
+            # 非计划时间触发的补跑，日志里标一下，方便核对「昨晚漏的今天补上了」
+            "note": reason,
             "target": ("电影" if is_movie else
                        (f"第 {target} 集" if target else ("全部未下集" if not one_by_one else "已补齐"))),
             "found": 0, "submitted": 0, "status": "ok", "message": "",
@@ -682,6 +898,8 @@ class PtSubscriber(_PluginBase):
     # ------------------------------------------------------- 记录 + 通知
     def _finish(self, sub: dict, entry: dict) -> None:
         """落一条运行记录，需要的话顺手推一条 MP 通知。"""
+        if entry.get("note") and entry.get("message"):
+            entry["message"] = f"【{entry['note']}】{entry['message']}"
         self.store.add_log(entry)
         try:
             self._notify_result(sub, entry)
