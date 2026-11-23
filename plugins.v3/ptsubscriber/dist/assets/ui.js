@@ -1,5 +1,5 @@
 /* PtSubscriber 插件页面：原生 DOM，无构建工具，宿主注入的 api 负责鉴权。 */
-const UI_VERSION = '1.5.3';
+const UI_VERSION = '1.5.4';
 const CSS = `
 .pts-root,.pts-ov,.pts-libpop{--acc:#8b5cf6;--acc2:#a78bfa;--sur:#ffffff;--sur2:#f7f7fb;--sur3:#eeeef6;--on:#1f2230;--muted:rgba(31,34,48,.58);--line:rgba(17,24,39,.1);--soft:rgba(139,92,246,.12);--danger:#dc2626;--ok:#16a34a;--warn:#b45309}
 .pts-dark{--sur:#1b1e26;--sur2:#232733;--sur3:#2b3040;--on:#e9ebf2;--muted:rgba(233,235,242,.6);--line:rgba(255,255,255,.12);--soft:rgba(139,92,246,.22);--danger:#f87171;--ok:#4ade80;--warn:#fbbf24}
@@ -68,7 +68,7 @@ const CSS = `
 .pts-pbody .pts-wdone{color:#2e9d63;font-weight:700}
 .pts-pbar{position:absolute;left:0;right:0;bottom:0;height:2.5px;background:rgba(139,92,246,.13)}
 .pts-pbar>span{display:block;height:100%;background:linear-gradient(90deg,var(--acc),var(--acc2))}
-.pts-prog{display:inline-flex;align-items:center;gap:4px;font-weight:700;color:var(--on);font-variant-numeric:tabular-nums}
+.pts-prog{display:inline-flex;align-items:center;gap:4px;font-weight:700;color:var(--on);font-variant-numeric:tabular-nums;white-space:nowrap;min-width:0}
 .pts-prog .pts-ico{opacity:.7}
 .pts-pbody .sp{flex:1}
 /* 卡片第二行：订阅区间 + 还差几集（小一号，窄卡可换行，别抢主数字的视线） */
@@ -1544,14 +1544,26 @@ export function mountUI(root, api, opts) {
     const scEnd = Number(sub.scope_end || 0) || total;
     const lib = Number(sub.lib_count || 0) || (sub.library_eps ? sub.library_eps.length : 0);
     const high = Number(sub.high_ep || 0);
+    // 「已下 12 集」看不出下到第几集了：有人从第 10 集才开始订阅，12 集可能已到 21 集。
+    // 主数字改成集号口径「下到第 21 集」，集数总量放到第二行小字，两边互补不打架。
+    const scHigh = Number(sub.scope_high || 0) || Math.min(high || 0, scEnd || high || 0);
     if (sub.kind === 'movie') {
       // 电影只有「入了没入」两种状态：入库了就直接写在主数字上，别只留个「电影」
       prog.append(el('b', '', sub.lib_in ? '已入库' : (done ? '已下载' : '电影')));
-    } else if (scTotal) {
-      prog.append(el('b', '', '已下 ' + scDone + ' 集'));
+    } else if (scHigh) {
+      // 「下到 21 集」而不是「下到第 21 集」：430px 手机两列时卡片内容只有 ~170px，
+      // 多一个「第」字就会被挤成「下到第 21 / 集」两行，完整说法放悬停提示里
+      prog.append(el('b', '', '下到 ' + scHigh + ' 集'));
+    } else if (lib) {
+      prog.append(el('b', '', '库有 ' + lib + ' 集'));
     } else {
-      prog.append(el('b', '', done || lib ? '已下 ' + (done || lib) + ' 集' : '待补搜'));
+      prog.append(el('b', '', '待补搜'));
     }
+    // 主数字的完整口径放悬停：卡片上为了窄屏只写「下到 21 集」
+    prog.title = sub.kind === 'movie'
+      ? (sub.lib_in ? '这部电影已经在媒体库里了' : '电影：下到即止')
+      : (scHigh ? `已下到第 ${scHigh} 集（订阅第 ${scStart}~${scEnd} 集，区间内已下 ${scDone} 集，共 ${scTotal} 集）`
+                : (lib ? `媒体库现有 ${lib} 集，还没开始补搜` : '还没下到任何一集，到点自动去站点搜'));
     bodyEl.append(prog, el('span', 'sp'));
     // 右下角：整部已经下完的写「已完成」，不再给一个不会再发生的「下次更新」；
     // 其余显示下次更新的具体日期时间（11/28 19:00），没有下次的回退到上次执行 / 待首跑。
@@ -1618,8 +1630,10 @@ export function mountUI(root, api, opts) {
       info.append(el('span', '', left));
       const libEl = libTag(sub);
       if (libEl) info.append(el('span', 'sp'), libEl);
-      info.title = `订阅第 ${scStart}~${scEnd} 集，共 ${scTotal} 集；已下 ${scDone} 集，还差 ${scLeft} 集`
-        + '。已下过的集（包括看完删掉的）不会重复下载；右侧「已入库」悬停可看具体集数。';
+      info.title = `订阅第 ${scStart}~${scEnd} 集，共 ${scTotal} 集；`
+        + (scHigh ? `已下到第 ${scHigh} 集（区间内已下 ${scDone} 集）` : `已下 ${scDone} 集`)
+        + `，还差 ${scLeft} 集。`
+        + '已下过的集（包括看完删掉的）不会重复下载；右侧「已入库」悬停可看具体集数。';
       card.append(info);
     }
 
@@ -2097,7 +2111,13 @@ export function mountUI(root, api, opts) {
       // 媒体库已有几集入库：保存时会自动跳过，只补其它集
       const lib = (advance && advance.library_eps) || [];
       const doneInScope = sub ? Number(sub.scope_done || 0) : 0;
-      if (doneInScope) parts.push(`已下 ${doneInScope} 集`);
+      const highInScope = sub ? Number(sub.scope_high || 0) : 0;
+      // 摘要和卡片同口径：集数 + 下到第几集，从中间订阅的人一眼看出进度到哪
+      if (doneInScope) {
+        parts.push(highInScope
+          ? `已下 ${doneInScope} 集（到第 ${highInScope} 集）`
+          : `已下 ${doneInScope} 集`);
+      }
       sum.eps.textContent = parts.length ? parts.join(' · ') : '不限';
       sum.eps.title = '已下过的集（包括看完删掉腾空间的）不会再下第二次；'
         + (lib.length ? `媒体库现在有 ${lib.length} 集入库，保存时自动跳过` : '保存时先读媒体库，只补没入库的集');

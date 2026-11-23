@@ -230,6 +230,9 @@ def episode_scope(sub: dict) -> dict:
         "end": end,
         "total": span,
         "done": len(in_scope),
+        # 区间内已下的最高集号 = 「下到第几集」。用户从中间开始订阅（如 10-30），
+        # 只看「已下 12 集」看不出进度下到哪了，这个数字才直观。
+        "high": in_scope[-1] if in_scope else 0,
         "left": max(0, span - len(in_scope)) if span else 0,
     }
 

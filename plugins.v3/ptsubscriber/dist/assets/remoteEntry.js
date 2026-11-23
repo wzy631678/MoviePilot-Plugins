@@ -2,17 +2,17 @@
 const currentImports = {};
 const exportSet = new Set(['Module', '__esModule', 'default', '_export_sfc']);
 const moduleMap = {
-  "./Page": () => __federation_import('./__federation_expose_Page.js?v=1.5.3').then(module =>
+  "./Page": () => __federation_import('./__federation_expose_Page.js?v=1.5.4').then(module =>
     Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module),
-  "./Config": () => __federation_import('./__federation_expose_Page.js?v=1.5.3').then(module =>
+  "./Config": () => __federation_import('./__federation_expose_Page.js?v=1.5.4').then(module =>
     Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module),
-  "./Dashboard": () => __federation_import('./__federation_expose_Page.js?v=1.5.3').then(module =>
+  "./Dashboard": () => __federation_import('./__federation_expose_Page.js?v=1.5.4').then(module =>
     Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module),
-  "./AppPage": () => __federation_import('./__federation_expose_AppPage.js?v=1.5.3').then(module =>
+  "./AppPage": () => __federation_import('./__federation_expose_AppPage.js?v=1.5.4').then(module =>
     Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module),
   // nav_key=search 的专用入口：MP 优先按 ./AppPage<NavKey> 加载，
   // 之前只暴露 ./AppPage，部分版本不回退就直接白页
-  "./AppPageSearch": () => __federation_import('./__federation_expose_AppPageSearch.js?v=1.5.3').then(module =>
+  "./AppPageSearch": () => __federation_import('./__federation_expose_AppPageSearch.js?v=1.5.4').then(module =>
     Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module),
 };
 

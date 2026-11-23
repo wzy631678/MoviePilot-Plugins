@@ -288,6 +288,9 @@ class Store:
             sub["scope_end"] = sc["end"]
             sub["scope_total"] = sc["total"]
             sub["scope_done"] = sc["done"]
+            # 区间内已下的最高集号：卡片上写「下到第 21 集」，
+            # 从中间订阅（10-30）也能一眼看出进度在哪
+            sub["scope_high"] = sc["high"]
             sub["scope_left"] = sc["left"]
             sub["poster_url"] = poster_url(sub.get("poster_path"))
             last = runs.get(str(sub.get("id") or "")) or {}
