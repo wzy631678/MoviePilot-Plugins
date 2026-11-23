@@ -259,7 +259,7 @@ def _name_tier(core: str, title: str) -> int:
 class PtSubscriber(_PluginBase):
     plugin_name = "定时订阅下载"
     plugin_desc = "默认按 TMDB 推荐更新时间自动到指定站点搜资源（也可自选每天/每周指定星期几点），按详细规则下载到指定容器；自动对接 TMDB，按片名、年份、剧集/电影、集数逐项比对，只把真正这部排在最前，并把每集播出日列成表；读媒体库只补没入库的集，已下过的（含删掉的）不重下。聊天入口不用打斜杠，一条说全最省事：「订阅 天下第一 观众 1080P 周一5:30」（片名/站点/清晰度/周期顺序随意）；也可以只发「订阅 天才女友」先列同名作品，回序号后再选「从第几集 / 哪些站 / 多久刷一次」，回「确定」立刻补搜并把能下的资源列出来让你挑；「查资源 仙逆 馒头 1080P」只搜一轮直接下，不建订阅。斜杠命令 /ptsub、/ptfind、/ptlist 一样可用；回复全是纯文本不带图。"
-    plugin_version = "1.10.21"
+    plugin_version = "1.10.22"
     plugin_author = "wzy"
     plugin_config_prefix = "ptsubscriber_"
     plugin_order = 90
@@ -1198,6 +1198,14 @@ class PtSubscriber(_PluginBase):
                 patch: dict = {"air_state": state}
                 if rec and not (sub.get("recommend_date") or "").strip():
                     patch["recommend_date"] = rec
+                # 下一集播出日期也顺手缓存，卡片右下角显示「下次真正下载的日子」
+                if air.get("next_air_date"):
+                    patch["air_next_ep"] = air.get("next_ep")
+                    patch["air_next_date"] = air.get("next_air_date")
+                elif air.get("last_air_date"):
+                    # 整季已播完：下一集没有了，用最后一集播出日，前端会显示「已完成」
+                    patch["air_next_ep"] = None
+                    patch["air_next_date"] = air.get("last_air_date")
                 self.store.set_sub_fields(sid, **patch)
             return self.store.get_sub(sid) or sub
         except Exception as exc:  # noqa: BLE001 - 读不到媒体库/TMDB 不影响订阅
@@ -1289,6 +1297,21 @@ class PtSubscriber(_PluginBase):
             text = self._next_run_text(item.get("id", ""))
             if text:
                 item["next_run_at"] = text
+            # 下一集播出日期：卡片右下角显示「下次真正下载的日子」。
+            # 保存时可能还没查到 TMDB 播出表（air_next_date 为空），这里兜底补一次；
+            # 查不到就保持原样，前端回退到 next_run_at。
+            if (item.get("tmdb_id") and (item.get("kind") or "series") != "movie"
+                    and not (item.get("air_next_date") or "").strip()):
+                try:
+                    air = meta_air_dates(int(item["tmdb_id"]), item.get("season")) or {}
+                    if air.get("next_air_date"):
+                        item["air_next_ep"] = air.get("next_ep")
+                        item["air_next_date"] = air.get("next_air_date")
+                    elif air.get("last_air_date"):
+                        item["air_next_ep"] = None
+                        item["air_next_date"] = air.get("last_air_date")
+                except Exception as exc:  # noqa: BLE001 - 查不到就不改，绝不影响列表
+                    logger.debug(f"[{self.plugin_name}] 下一集播出日兜底失败：{type(exc).__name__}: {exc}")
         return {"ok": True, "items": items}
 
     def api_notify_test(self, payload: dict = Body(default={})) -> dict:

@@ -1,5 +1,5 @@
 /* PtSubscriber 插件页面：原生 DOM，无构建工具，宿主注入的 api 负责鉴权。 */
-const UI_VERSION = '1.5.2';
+const UI_VERSION = '1.5.3';
 const CSS = `
 .pts-root,.pts-ov,.pts-libpop{--acc:#8b5cf6;--acc2:#a78bfa;--sur:#ffffff;--sur2:#f7f7fb;--sur3:#eeeef6;--on:#1f2230;--muted:rgba(31,34,48,.58);--line:rgba(17,24,39,.1);--soft:rgba(139,92,246,.12);--danger:#dc2626;--ok:#16a34a;--warn:#b45309}
 .pts-dark{--sur:#1b1e26;--sur2:#232733;--sur3:#2b3040;--on:#e9ebf2;--muted:rgba(233,235,242,.6);--line:rgba(255,255,255,.12);--soft:rgba(139,92,246,.22);--danger:#f87171;--ok:#4ade80;--warn:#fbbf24}
@@ -1332,6 +1332,20 @@ export function mountUI(root, api, opts) {
   }
   const WEEK = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 
+  // 「下一集播出日期」压成短文案：11/28 19:00（播出日 + 订阅的下载时间点）。
+  // air_next_date 形如 "2026-11-28"（纯日期），timeStr 形如 "19:00"。
+  function airLabel(dateStr, timeStr) {
+    const raw = String(dateStr || '').trim().slice(0, 10);
+    if (!raw) return '';
+    const t = Date.parse(raw + 'T00:00:00');
+    if (!isFinite(t)) return raw;
+    const d = new Date(t);
+    const pad = (n) => String(n).padStart(2, '0');
+    const hm = String(timeStr || '19:00').trim() || '19:00';
+    const md = pad(d.getMonth() + 1) + '/' + pad(d.getDate()) + ' ' + hm;
+    return d.getFullYear() === new Date().getFullYear() ? md : d.getFullYear() + '/' + md;
+  }
+
   async function runSub(sub) {
     try {
       const r = await call('POST', 'sub/run', { id: sub.id });
@@ -1551,6 +1565,16 @@ export function mountUI(root, api, opts) {
       whenTitle = sub.kind === 'movie'
         ? '这部电影已经在媒体库里了，不会再下载'
         : `订阅的第 ${scStart}~${scEnd} 集已全部下完（${scDone}/${scTotal}），不会再补`;
+    } else if (sub.air_next_date) {
+      // 优先显示「下一集真正播出的日期」：这是下次需要下载的日子。
+      // 订阅区间已到最后一集但还没下完时（区间 > 实际集数），air_next_date
+      // 可能是最后一集的播出日，仍能提示「该等这集」。
+      whenText = airLabel(sub.air_next_date, sub.schedule_time);
+      const at = Date.parse(String(sub.air_next_date).slice(0, 10) + 'T00:00:00');
+      whenTitle = '下一集' + (sub.air_next_ep ? ' 第' + sub.air_next_ep + ' 集' : '')
+        + ' 将于 ' + sub.air_next_date + ' 播出，'
+        + '到点去站点搜' + (sub.schedule_time ? '（' + sub.schedule_time + '）' : '')
+        + (isFinite(at) ? '，' + WEEK[new Date(at).getDay()] : '');
     } else if (sub.next_run_at) {
       whenText = nextLabel(sub.next_run_at);
       const t = Date.parse(String(sub.next_run_at).replace(' ', 'T'));
@@ -1563,7 +1587,7 @@ export function mountUI(root, api, opts) {
       whenText = sub.enabled ? '待首跑' : '已停用';
       whenTitle = sub.enabled ? '还没执行过，保存后按计划自动跑' : '订阅已停用';
     }
-    if (sub.last_run_at && sub.next_run_at && !allDone) {
+    if (sub.last_run_at && (sub.next_run_at || sub.air_next_date) && !allDone) {
       whenTitle += '；上次 ' + sub.last_run_at + (sub.last_status === 'ok' ? '（成功）' : '');
     }
     const when = el('span', allDone ? 'pts-wdone' : '', whenText);
