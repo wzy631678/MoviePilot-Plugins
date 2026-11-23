@@ -1,5 +1,5 @@
 /* PtSubscriber 插件页面：原生 DOM，无构建工具，宿主注入的 api 负责鉴权。 */
-const UI_VERSION = '1.5.1';
+const UI_VERSION = '1.5.2';
 const CSS = `
 .pts-root,.pts-ov,.pts-libpop{--acc:#8b5cf6;--acc2:#a78bfa;--sur:#ffffff;--sur2:#f7f7fb;--sur3:#eeeef6;--on:#1f2230;--muted:rgba(31,34,48,.58);--line:rgba(17,24,39,.1);--soft:rgba(139,92,246,.12);--danger:#dc2626;--ok:#16a34a;--warn:#b45309}
 .pts-dark{--sur:#1b1e26;--sur2:#232733;--sur3:#2b3040;--on:#e9ebf2;--muted:rgba(233,235,242,.6);--line:rgba(255,255,255,.12);--soft:rgba(139,92,246,.22);--danger:#f87171;--ok:#4ade80;--warn:#fbbf24}
@@ -65,6 +65,7 @@ const CSS = `
 .pts-sbadge.off{background:rgba(255,255,255,.14);color:rgba(255,255,255,.78)}
 .pts-pbody{display:flex;align-items:center;gap:8px;padding:9px 11px 10px;font-size:12px;color:var(--muted)}
 .pts-pbody>span:last-child{white-space:nowrap;flex:none}
+.pts-pbody .pts-wdone{color:#2e9d63;font-weight:700}
 .pts-pbar{position:absolute;left:0;right:0;bottom:0;height:2.5px;background:rgba(139,92,246,.13)}
 .pts-pbar>span{display:block;height:100%;background:linear-gradient(90deg,var(--acc),var(--acc2))}
 .pts-prog{display:inline-flex;align-items:center;gap:4px;font-weight:700;color:var(--on);font-variant-numeric:tabular-nums}
@@ -1317,22 +1318,19 @@ export function mountUI(root, api, opts) {
     return raw.slice(0, 10);
   }
 
-  // 「下次执行」压成短文案：今天 19:00 / 明天 19:00 / 12月01日 19:00
+  // 「下次更新」直接写日期+时间：11/28 19:00；跨年才补年份 2027/01/05 19:00。
+  // 以前写「今天 19:00」，隔几天再看根本不知道是哪天，得靠悬停。
   function nextLabel(text) {
     const raw = String(text || '').trim();
     if (!raw) return '';
     const t = Date.parse(raw.replace(' ', 'T'));
     if (!isFinite(t)) return raw.slice(5, 16);
     const d = new Date(t);
-    const now = new Date();
-    const hm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
-    const dayOf = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
-    const diff = Math.round((dayOf(d) - dayOf(now)) / 86400000);
-    if (diff === 0) return '今天 ' + hm;
-    if (diff === 1) return '明天 ' + hm;
-    if (diff === 2) return '后天 ' + hm;
-    return String(d.getMonth() + 1).padStart(2, '0') + '/' + String(d.getDate()).padStart(2, '0') + ' ' + hm;
+    const pad = (n) => String(n).padStart(2, '0');
+    const md = pad(d.getMonth() + 1) + '/' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+    return d.getFullYear() === new Date().getFullYear() ? md : d.getFullYear() + '/' + md;
   }
+  const WEEK = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 
   async function runSub(sub) {
     try {
@@ -1541,13 +1539,23 @@ export function mountUI(root, api, opts) {
       prog.append(el('b', '', done || lib ? '已下 ' + (done || lib) + ' 集' : '待补搜'));
     }
     bodyEl.append(prog, el('span', 'sp'));
-    // 右下角：优先显示「下次什么时候跑」，任务墙看的是节奏；
-    // 没有下次就跑过的，回退到上次执行时间；一次都没跑过的写「待首跑」。
+    // 右下角：整部已经下完的写「已完成」，不再给一个不会再发生的「下次更新」；
+    // 其余显示下次更新的具体日期时间（11/28 19:00），没有下次的回退到上次执行 / 待首跑。
+    const allDone = sub.kind === 'movie'
+      ? !!sub.lib_in
+      : (scTotal > 0 ? scDone >= scTotal : (total > 0 && done >= total));
     let whenText = '';
     let whenTitle = '';
-    if (sub.next_run_at) {
+    if (allDone) {
+      whenText = '已完成';
+      whenTitle = sub.kind === 'movie'
+        ? '这部电影已经在媒体库里了，不会再下载'
+        : `订阅的第 ${scStart}~${scEnd} 集已全部下完（${scDone}/${scTotal}），不会再补`;
+    } else if (sub.next_run_at) {
       whenText = nextLabel(sub.next_run_at);
-      whenTitle = '下次执行 ' + sub.next_run_at;
+      const t = Date.parse(String(sub.next_run_at).replace(' ', 'T'));
+      whenTitle = '下次更新 ' + sub.next_run_at
+        + (isFinite(t) ? '（' + WEEK[new Date(t).getDay()] + '）' : '');
     } else if (sub.last_run_at) {
       whenText = ago(sub.last_run_at);
       whenTitle = '上次执行 ' + sub.last_run_at;
@@ -1555,10 +1563,10 @@ export function mountUI(root, api, opts) {
       whenText = sub.enabled ? '待首跑' : '已停用';
       whenTitle = sub.enabled ? '还没执行过，保存后按计划自动跑' : '订阅已停用';
     }
-    if (sub.last_run_at && sub.next_run_at) {
+    if (sub.last_run_at && sub.next_run_at && !allDone) {
       whenTitle += '；上次 ' + sub.last_run_at + (sub.last_status === 'ok' ? '（成功）' : '');
     }
-    const when = el('span', '', whenText);
+    const when = el('span', allDone ? 'pts-wdone' : '', whenText);
     when.title = whenTitle;
     bodyEl.append(when);
     card.append(bodyEl);
