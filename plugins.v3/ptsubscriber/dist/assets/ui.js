@@ -1,5 +1,5 @@
 /* PtSubscriber 插件页面：原生 DOM，无构建工具，宿主注入的 api 负责鉴权。 */
-const UI_VERSION = '1.5.4';
+const UI_VERSION = '1.5.5';
 const CSS = `
 .pts-root,.pts-ov,.pts-libpop{--acc:#8b5cf6;--acc2:#a78bfa;--sur:#ffffff;--sur2:#f7f7fb;--sur3:#eeeef6;--on:#1f2230;--muted:rgba(31,34,48,.58);--line:rgba(17,24,39,.1);--soft:rgba(139,92,246,.12);--danger:#dc2626;--ok:#16a34a;--warn:#b45309}
 .pts-dark{--sur:#1b1e26;--sur2:#232733;--sur3:#2b3040;--on:#e9ebf2;--muted:rgba(233,235,242,.6);--line:rgba(255,255,255,.12);--soft:rgba(139,92,246,.22);--danger:#f87171;--ok:#4ade80;--warn:#fbbf24}
@@ -1567,26 +1567,40 @@ export function mountUI(root, api, opts) {
     bodyEl.append(prog, el('span', 'sp'));
     // 右下角：整部已经下完的写「已完成」，不再给一个不会再发生的「下次更新」；
     // 其余显示下次更新的具体日期时间（11/28 19:00），没有下次的回退到上次执行 / 待首跑。
-    const allDone = sub.kind === 'movie'
-      ? !!sub.lib_in
-      : (scTotal > 0 ? scDone >= scTotal : (total > 0 && done >= total));
+    // 「下完了没有」不能只看本地台账：台账只说我们下过哪几集，说不了这剧还更不更新。
+    // 用户的原话是「TMDB 说完成了才是完成了」——TMDB 还挂着下一集（且落在订阅区间里），
+    // 就还没完，右下角继续显示那一集的播出日；只有 TMDB 这一季播完了才写「已完成」。
+    const scopeFull = scTotal > 0 ? scDone >= scTotal : (total > 0 && done >= total);
+    const nextEp = Number(sub.air_next_ep || 0);
+    const nextInScope = nextEp > 0 && nextEp >= (scStart || 1) && (!scEnd || nextEp <= scEnd);
+    const tmdbPending = sub.air_done !== true && nextInScope;
+    const allDone = sub.kind === 'movie' ? !!sub.lib_in : (scopeFull && !tmdbPending);
     let whenText = '';
     let whenTitle = '';
     if (allDone) {
       whenText = '已完成';
       whenTitle = sub.kind === 'movie'
         ? '这部电影已经在媒体库里了，不会再下载'
-        : `订阅的第 ${scStart}~${scEnd} 集已全部下完（${scDone}/${scTotal}），不会再补`;
-    } else if (sub.air_next_date) {
+        : `订阅的第 ${scStart}~${scEnd} 集已全部下完（${scDone}/${scTotal}），TMDB 这一季也没有新集了，不会再补`;
+    } else if (sub.air_next_date && !sub.air_done && (nextInScope || !nextEp)) {
       // 优先显示「下一集真正播出的日期」：这是下次需要下载的日子。
       // 订阅区间已到最后一集但还没下完时（区间 > 实际集数），air_next_date
       // 可能是最后一集的播出日，仍能提示「该等这集」。
       whenText = airLabel(sub.air_next_date, sub.schedule_time);
       const at = Date.parse(String(sub.air_next_date).slice(0, 10) + 'T00:00:00');
-      whenTitle = '下一集' + (sub.air_next_ep ? ' 第' + sub.air_next_ep + ' 集' : '')
+      whenTitle = '下一集' + (sub.air_next_ep ? ' 第' + sub.air_next_ep + '集' : '')
         + ' 将于 ' + sub.air_next_date + ' 播出，'
         + '到点去站点搜' + (sub.schedule_time ? '（' + sub.schedule_time + '）' : '')
-        + (isFinite(at) ? '，' + WEEK[new Date(at).getDay()] : '');
+        + (isFinite(at) ? '，' + WEEK[new Date(at).getDay()] : '')
+        + (scopeFull ? '；订阅区间已经下完，这是 TMDB 后续还在更的集' : '');
+    } else if (scLeft > 0) {
+      // TMDB 这一季已经播完（或查不到播出表），但订阅区间还差几集：
+      // 别再写「已完成」，也别显示一个已经过去的日子，直接说还差几集。
+      whenText = '待补 ' + scLeft + ' 集';
+      whenTitle = `订阅第 ${scStart}~${scEnd} 集里还有 ${scLeft} 集没下到，`
+        + (sub.air_done ? 'TMDB 这一季已播完，' : '')
+        + '到点会自动再去站点补搜'
+        + (sub.next_run_at ? `（下次 ${sub.next_run_at}）` : '');
     } else if (sub.next_run_at) {
       whenText = nextLabel(sub.next_run_at);
       const t = Date.parse(String(sub.next_run_at).replace(' ', 'T'));

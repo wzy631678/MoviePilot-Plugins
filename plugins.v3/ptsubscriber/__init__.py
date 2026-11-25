@@ -260,7 +260,7 @@ def _name_tier(core: str, title: str) -> int:
 class PtSubscriber(_PluginBase):
     plugin_name = "定时订阅下载"
     plugin_desc = "默认按 TMDB 推荐更新时间自动到指定站点搜资源（也可自选每天/每周指定星期几点），按详细规则下载到指定容器；自动对接 TMDB，按片名、年份、剧集/电影、集数逐项比对，只把真正这部排在最前，并把每集播出日列成表；读媒体库只补没入库的集，已下过的（含删掉的）不重下。聊天入口不用打斜杠，一条说全最省事：「订阅 天下第一 观众 1080P 周一5:30」（片名/站点/清晰度/周期顺序随意）；也可以只发「订阅 天才女友」先列同名作品，回序号后再选「从第几集 / 哪些站 / 多久刷一次」，回「确定」立刻补搜并把能下的资源列出来让你挑；「查资源 仙逆 馒头 1080P」只搜一轮直接下，不建订阅。斜杠命令 /ptsub、/ptfind、/ptlist 一样可用；回复全是纯文本不带图。"
-    plugin_version = "1.10.25"
+    plugin_version = "1.10.26"
     plugin_author = "wzy"
     plugin_config_prefix = "ptsubscriber_"
     plugin_order = 90
@@ -877,10 +877,14 @@ class PtSubscriber(_PluginBase):
         一个小时轻量巡检；只查本地数据库，不碰站点和下载器。
         """
         changed = 0
+        air_left = 3   # 每轮最多问 3 条 TMDB：播出日往后翻，不打开页面也能自己走
         for sub in self.store.subs():
             try:
                 if self._sync_library(sub):
                     changed += 1
+                if air_left > 0 and self._air_stale(sub):
+                    air_left -= 1
+                    self._refresh_schedule_cache(sub)
             except Exception as exc:  # noqa: BLE001 - 单条读不到不影响其它
                 logger.debug(f"[{self.plugin_name}] 入库状态刷新失败"
                              f"（{sub.get('name')}）：{type(exc).__name__}: {exc}")
@@ -1267,6 +1271,43 @@ class PtSubscriber(_PluginBase):
             pass
 
     # ------------------------------------------------------- TMDB 元数据
+    @staticmethod
+    def _air_patch(air: dict) -> dict:
+        """把 TMDB 播出表压成三个字段：下一集、下一集播出日、这一季播完没有。
+
+        ``air_done`` 只有在「TMDB 这一季已经没有未播的集」时才给 True，前端据此才敢
+        写「已完成」；只要 TMDB 还挂着下一集，就老老实实显示那一集的播出日。
+        用户的原话是「tm说完成了才是完成了」——本地下载台账只说明我们下过哪些集，
+        说明不了这部剧还有没有续集。
+        """
+        if not air:
+            return {}
+        if air.get("next_ep"):
+            return {"air_done": False,
+                    "air_next_ep": int(air["next_ep"]),
+                    "air_next_date": str(air.get("next_air_date") or "")}
+        if air.get("last_air_date"):
+            # 整季已播完：没有下一集了，日期留最后一集的播出日备查
+            return {"air_done": True, "air_next_ep": "", "air_next_date": str(air["last_air_date"])}
+        return {}
+
+    def _air_stale(self, sub: dict) -> bool:
+        """播出日缓存过期没有：从没查过、还是「下一集」的日期已经过去了。
+
+        「过去」指严格早于今天：播出当天仍显示当天，等第二天再往后翻一集，
+        不然一到 00:00 就把「今晚 19:00 要下」换成下周的日期了。
+        """
+        if not sub.get("tmdb_id") or (sub.get("kind") or "series") == "movie":
+            return False
+        if not sub.get("air_state") or not (sub.get("recommend_date") or "").strip():
+            return True
+        cached = str(sub.get("air_next_date") or "")[:10]
+        if not cached:
+            return True
+        if sub.get("air_done"):
+            return False
+        return cached < self._now_dt().strftime("%Y-%m-%d")
+
     def _refresh_schedule_cache(self, sub: dict) -> dict:
         """保存后把「媒体库已入库集数」缓存到订阅（卡片显示用），
         并给空的推荐更新日补上 TMDB 下一集播出日期（默认值，用户可改）。
@@ -1300,24 +1341,14 @@ class PtSubscriber(_PluginBase):
                     self.store.mark_delivered(sid, delivered)
                 self.store.set_sub_fields(sid, library_eps=lib, lib_synced=True,
                                           lib_at=_dt.now().strftime("%Y-%m-%d %H:%M:%S"))
-            # TMDB 播出日只在还没查过时查（网络请求慢），查过就不再重复打 TMDB
-            if (sub.get("tmdb_id") and (sub.get("kind") or "series") != "movie"
-                    and (not sub.get("air_state") or not (sub.get("recommend_date") or "").strip())):
-                # 推荐更新日自动补全：先看还没播的下一集；整季已经播完（如 Doctor X 12/12）
-                # 就用最后一集的播出日兜底，别让「推荐更新」永远挂着红色的「未设置」。
+            # TMDB 播出日：没查过 / 缓存的「下一集」日期已经过去，就重新打一次 TMDB。
+            # 以前只在没 air_state 时查一次，导致日期永远冻在第一次查到的那集上。
+            if self._air_stale(sub):
                 air = meta_air_dates(int(sub["tmdb_id"]), sub.get("season")) or {}
                 rec, state = recommend_from_air(air)
-                patch: dict = {"air_state": state}
+                patch: dict = {"air_state": state, **self._air_patch(air)}
                 if rec and not (sub.get("recommend_date") or "").strip():
                     patch["recommend_date"] = rec
-                # 下一集播出日期也顺手缓存，卡片右下角显示「下次真正下载的日子」
-                if air.get("next_air_date"):
-                    patch["air_next_ep"] = air.get("next_ep")
-                    patch["air_next_date"] = air.get("next_air_date")
-                elif air.get("last_air_date"):
-                    # 整季已播完：下一集没有了，用最后一集播出日，前端会显示「已完成」
-                    patch["air_next_ep"] = None
-                    patch["air_next_date"] = air.get("last_air_date")
                 self.store.set_sub_fields(sid, **patch)
             return self.store.get_sub(sid) or sub
         except Exception as exc:  # noqa: BLE001 - 读不到媒体库/TMDB 不影响订阅
@@ -1409,19 +1440,19 @@ class PtSubscriber(_PluginBase):
             text = self._next_run_text(item.get("id", ""))
             if text:
                 item["next_run_at"] = text
-            # 下一集播出日期：卡片右下角显示「下次真正下载的日子」。
-            # 保存时可能还没查到 TMDB 播出表（air_next_date 为空），这里兜底补一次；
-            # 查不到就保持原样，前端回退到 next_run_at。
+            # 下一集播出日期 / 这一季播完没有：卡片右下角据此显示「下次真正下载的日子」
+            # 或「已完成」。只有「一条都没查过」时才在这里现场补，补完立刻落库，
+            # 免得前端 45 秒轮询一次就把 TMDB 打一遍；日期往后翻由 _air_stale 那条走缓存刷新。
             if (item.get("tmdb_id") and (item.get("kind") or "series") != "movie"
-                    and not (item.get("air_next_date") or "").strip()):
+                    and not str(item.get("air_next_date") or "").strip()
+                    and not item.get("air_done")):
                 try:
                     air = meta_air_dates(int(item["tmdb_id"]), item.get("season")) or {}
-                    if air.get("next_air_date"):
-                        item["air_next_ep"] = air.get("next_ep")
-                        item["air_next_date"] = air.get("next_air_date")
-                    elif air.get("last_air_date"):
-                        item["air_next_ep"] = None
-                        item["air_next_date"] = air.get("last_air_date")
+                    patch = self._air_patch(air)
+                    if patch:
+                        item.update(patch)
+                        if item.get("id"):
+                            self.store.set_sub_fields(item["id"], **patch)
                 except Exception as exc:  # noqa: BLE001 - 查不到就不改，绝不影响列表
                     logger.debug(f"[{self.plugin_name}] 下一集播出日兜底失败：{type(exc).__name__}: {exc}")
         return {"ok": True, "items": items}
