@@ -35,6 +35,7 @@ from .meta import transferred_eps as meta_transferred_eps
 from .meta import downloaded_eps as meta_downloaded_eps
 from .models import (
     next_episode,
+    parse_episode,
     recommend_from_air,
     resolution_of,
     schedule_label,
@@ -259,7 +260,7 @@ def _name_tier(core: str, title: str) -> int:
 class PtSubscriber(_PluginBase):
     plugin_name = "定时订阅下载"
     plugin_desc = "默认按 TMDB 推荐更新时间自动到指定站点搜资源（也可自选每天/每周指定星期几点），按详细规则下载到指定容器；自动对接 TMDB，按片名、年份、剧集/电影、集数逐项比对，只把真正这部排在最前，并把每集播出日列成表；读媒体库只补没入库的集，已下过的（含删掉的）不重下。聊天入口不用打斜杠，一条说全最省事：「订阅 天下第一 观众 1080P 周一5:30」（片名/站点/清晰度/周期顺序随意）；也可以只发「订阅 天才女友」先列同名作品，回序号后再选「从第几集 / 哪些站 / 多久刷一次」，回「确定」立刻补搜并把能下的资源列出来让你挑；「查资源 仙逆 馒头 1080P」只搜一轮直接下，不建订阅。斜杠命令 /ptsub、/ptfind、/ptlist 一样可用；回复全是纯文本不带图。"
-    plugin_version = "1.10.23"
+    plugin_version = "1.10.24"
     plugin_author = "wzy"
     plugin_config_prefix = "ptsubscriber_"
     plugin_order = 90
@@ -754,9 +755,9 @@ class PtSubscriber(_PluginBase):
         if queued:
             logger.info(f"[{self.plugin_name}] 有 {queued} 条订阅错过了计划时间，已排队补跑")
 
-    def _schedule_catchup(self, sid: str, delay: int, note: str, remaining: int) -> None:
+    def _schedule_catchup(self, sid: str, delay: int, note: str, remaining: int) -> bool:
         if not self._scheduler:
-            return
+            return False
         from datetime import timedelta
 
         try:
@@ -769,6 +770,8 @@ class PtSubscriber(_PluginBase):
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[{self.plugin_name}] 补跑排队失败：{type(exc).__name__}: {exc}")
+            return False
+        return True
 
     # --------------------------------------------- 入库状态：媒体库 / 转移历史
     LIB_SYNC_MINUTES = 5   # 常驻巡检间隔：只查本地库，不发网络请求，5 分钟一次很轻
@@ -994,8 +997,21 @@ class PtSubscriber(_PluginBase):
                 level = self.bridge.auth_level()
                 auth_note = ("（MP 用户认证临时未通过，站点功能被禁用，会自动重试）"
                              if 0 <= level < 2 else "")
+                # 把「站点到底搜到了哪几集」写进记录：用户说「明明有第 2 集却没下」时，
+                # 一眼能分清是站点没种、还是集号/规则/去重把它挡掉了。
+                seen = sorted({ep for ep in (
+                    parse_episode(str(it.get("title") or it.get("display_title") or ""))
+                    for it in (result.get("items") or [])) if ep})
+                seen_note = ""
+                if seen:
+                    head = "、".join(str(e) for e in seen[:12]) + ("…" if len(seen) > 12 else "")
+                    want = f"第 {target} 集" if target else "目标集"
+                    if target and int(target) in seen:
+                        seen_note = f"；站点已搜到第 {head} 集，{want}有资源但被规则/去重挡掉了"
+                    else:
+                        seen_note = f"；站点只搜到第 {head} 集，没有{want}"
                 entry.update(status="waiting", site=self._site_names(domains),
-                             message=f"{entry['target']}还没更新{auth_note}；{wait}")
+                             message=f"{entry['target']}还没更新{auth_note}{seen_note}；{wait}")
                 self._finish(sub, entry)
                 return
             # 追更只挑一个版本；单片也只要一个；补老剧才一次收多条（每集留一个）
@@ -1058,8 +1074,20 @@ class PtSubscriber(_PluginBase):
                 self._retry_state.pop(sid, None)
                 self._cancel_retry(sid)
                 nxt = next_episode(self.store.get_sub(sid) or sub) if not is_movie else None
-                tail = (f"；下一集等第 {nxt} 集" if nxt
-                        else ("；区间内已补齐" if one_by_one else ""))
+                # 追更接力：这一集下完后，若还有「已播出但没下到」的集，2 分钟后自动接着补下一集。
+                # 以前只有「补跑」那一轮会接力，定时任务/手动「立即执行」下完就停，下一集要等
+                # 明天 19:00 或 2 小时后的补跑窗口——用户看到的就是「第 2 集明明有了却一直不下」。
+                # 补跑触发的那一轮（reason 非空）自带接力，这里不重复排，避免两个 job 抢同一集。
+                chained = False
+                if one_by_one and nxt is not None and not reason:
+                    cur = self.store.get_sub(sid) or sub
+                    if self._need_catchup(cur, self._now_dt()):
+                        chained = self._schedule_catchup(sid, 120, "追更接续", 2)
+                if chained:
+                    tail = f"；2 分钟后自动接着补第 {nxt} 集"
+                else:
+                    tail = (f"；下一集等第 {nxt} 集" if nxt
+                            else ("；区间内已补齐" if one_by_one else ""))
                 entry["message"] = f"已提交 {len(titles)} 条：{titles[0][:40]}" + tail
             else:
                 msg = (submit.get("results") or [{}])[0].get("message") or "下载器未接受"
