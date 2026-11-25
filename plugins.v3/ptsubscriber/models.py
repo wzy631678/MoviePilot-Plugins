@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -296,11 +297,12 @@ def match_title(
     ep_end: int | None = None,
     kind: str = "series",
     season: int | None = None,
-    target_ep: int | None = None,
+    target_ep: int | Iterable[int] | None = None,
 ) -> tuple[bool, int | None]:
     """包含词全部命中、排除词一个都不命中、季/集数落在范围内。
 
-    target_ep 有值时只认这一集（一集一集补），避免一次把整季都下下来。
+    target_ep 有值时只认这几集（追更时是「已播未下的那几集」）。
+    同一天连播两集时传 [2, 3]，一轮就能把两集都挑出来，不用等两轮。
     """
     low = (title or "").lower()
     for word in split_words(include_words):
@@ -318,7 +320,11 @@ def match_title(
         if found is not None and found != int(season):
             return False, episode
     if target_ep is not None:
-        if episode != int(target_ep):
+        if isinstance(target_ep, int):
+            wants = {target_ep}
+        else:
+            wants = {int(x) for x in target_ep}
+        if episode not in wants:
             return False, episode
         return True, episode
     if ep_start is not None or ep_end is not None:

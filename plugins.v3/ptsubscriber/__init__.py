@@ -260,7 +260,7 @@ def _name_tier(core: str, title: str) -> int:
 class PtSubscriber(_PluginBase):
     plugin_name = "定时订阅下载"
     plugin_desc = "默认按 TMDB 推荐更新时间自动到指定站点搜资源（也可自选每天/每周指定星期几点），按详细规则下载到指定容器；自动对接 TMDB，按片名、年份、剧集/电影、集数逐项比对，只把真正这部排在最前，并把每集播出日列成表；读媒体库只补没入库的集，已下过的（含删掉的）不重下。聊天入口不用打斜杠，一条说全最省事：「订阅 天下第一 观众 1080P 周一5:30」（片名/站点/清晰度/周期顺序随意）；也可以只发「订阅 天才女友」先列同名作品，回序号后再选「从第几集 / 哪些站 / 多久刷一次」，回「确定」立刻补搜并把能下的资源列出来让你挑；「查资源 仙逆 馒头 1080P」只搜一轮直接下，不建订阅。斜杠命令 /ptsub、/ptfind、/ptlist 一样可用；回复全是纯文本不带图。"
-    plugin_version = "1.10.24"
+    plugin_version = "1.10.25"
     plugin_author = "wzy"
     plugin_config_prefix = "ptsubscriber_"
     plugin_order = 90
@@ -654,6 +654,57 @@ class PtSubscriber(_PluginBase):
         except Exception:
             pass
 
+    def _pending_episodes(self, sub: dict, now) -> List[int]:
+        """已播出、但台账里还没下到的集号（升序），用来「一次把积压的都下完」。
+
+        以前只盯 next_episode()（水位 +1），同一天连播两集（比如第 2、3 集都是 11/23）
+        就得等两轮：下完第 2 集等 2 分钟接力，才轮到第 3 集；关机几天回来积了 5 集
+        更要一轮一轮排队。这里一次性把「已播未下」全给出来，一轮全提交。
+
+        只有节目表（TMDB）确认播过的才算，避免把还没播的集提前拉下来。
+        查不到节目表 / 没填 tmdb_id 时返回空，调用方回退到 next_episode()，行为与以前一致。
+        """
+        if (sub.get("kind") or "series") == "movie":
+            return []
+        tmdb_id = sub.get("tmdb_id")
+        if not tmdb_id:
+            return []
+        try:
+            air = meta_air_dates(int(tmdb_id), sub.get("season")) or {}
+        except Exception as exc:  # noqa: BLE001 - 查不到就按单集水位走
+            logger.debug(f"[{self.plugin_name}] 查节目表失败：{type(exc).__name__}: {exc}")
+            return []
+        eps = air.get("eps") or []
+        if not eps:
+            return []
+        # 水位下限：只从「已经下到的最高集 + 1」往后算。
+        # 绝不按「缺口」回头补中间那几集——那些多半是看完删掉/转移失败的，
+        # 回头补就会把老集重下一遍（《光阴之外》第 43 集重下就是这么来的）。
+        floor = next_episode(sub)
+        if floor is None:
+            return []
+        start = int(sub.get("ep_start") or 0) or 1
+        end = int(sub.get("ep_end") or 0) or 0
+        done = {int(x) for x in (sub.get("delivered_eps") or [])}
+        today = now.strftime("%Y-%m-%d")
+        try:
+            fh, fm = (int(x) for x in str(sub.get("schedule_time") or "19:00").split(":"))
+        except (TypeError, ValueError):
+            fh, fm = 19, 0
+        # 今天才播的集要等当天计划时间点之后才认：白天站点多半还没出种
+        allow_today = now >= now.replace(hour=fh, minute=fm, second=0, microsecond=0)
+        out: List[int] = []
+        for row in eps:
+            ep = int(row.get("ep") or 0)
+            day = str(row.get("air_date") or "")[:10]
+            if not ep or not day or ep in done or ep in out:
+                continue
+            if ep < floor or ep < start or (end and ep > end):
+                continue
+            if day < today or (day == today and allow_today):
+                out.append(ep)
+        return sorted(out)
+
     def _need_catchup(self, sub: dict, now) -> bool:
         """是不是真有「已经播出、但还没下到」的集？没有就别白搜一趟。
 
@@ -886,7 +937,7 @@ class PtSubscriber(_PluginBase):
             return True, ""
 
     def _catch_up_run(self, sid: str, note: str = "补漏", remaining: int = 1) -> None:
-        """补跑一轮；关机几天积了好几集时，接着排下一轮（一次补一集）。"""
+        """补跑一轮；关机几天积了好几集时，一轮会把已播未下的一起下，还差再排下一轮。"""
         sub = self.store.get_sub(sid)
         if not sub or not sub.get("enabled"):
             return
@@ -918,12 +969,15 @@ class PtSubscriber(_PluginBase):
             return
         after_sub = self.store.get_sub(sid) or {}
         after = {int(x) for x in (after_sub.get("delivered_eps") or [])}
-        # 追更一次只下一集，后面若还有已播未下的，间隔 2 分钟接着补（最多 3 集）
+        # 一轮已经能把已播未下的都提交上去；还剩下的多半是站点还没出种，间隔 2 分钟再试一轮
         if after - before and self._need_catchup(after_sub, self._now_dt()):
             self._schedule_catchup(sid, 120, note, remaining - 1)
 
     def _run_sub(self, sid: str, force: bool = False, reason: str = "") -> None:
-        """补搜一轮：只盯「下一个还没下到的集」，下到就记账，没下到就等重试。
+        """补搜一轮：把「已播出、还没下到」的集一次都提交，没下到的等重试。
+
+        以前只盯 next_episode()（水位 +1），同一天连播两集要分两轮才补齐，
+        现在按 TMDB 播出表把已播未下的一起给出来，一轮全下。
 
         force=True 表示手动「立即执行」：即使订阅处于停用状态也照样跑一轮。
         reason 非空表示这轮是「开机补偿 / 补漏」触发的，日志里会标出来。
@@ -946,15 +1000,25 @@ class PtSubscriber(_PluginBase):
                 sub = self.store.get_sub(sid) or sub
             except Exception as exc:  # noqa: BLE001 - 媒体库/历史读不到不影响补搜
                 logger.debug(f"[{self.plugin_name}] 补搜前读媒体库/转移历史失败：{type(exc).__name__}: {exc}")
-        # 填了集数区间就「一集一集补」（追更场景）；没填就一次把命中的都收下来（补老剧）
+        # 填了集数区间就按集补（追更场景）；没填就一次把命中的都收下来（补老剧）
         one_by_one = (not is_movie) and bool(sub.get("ep_start") or sub.get("ep_end"))
-        target = next_episode(sub) if one_by_one else None
+        # 同一天连播两集（或关机几天积了几集）不能只盯水位 +1，否则一轮只下一集、
+        # 剩下的靠 2 分钟接力一轮一轮排队。这里先把「节目表确认播过、台账还没下」的集
+        # 一次拿全，一轮全提交；节目表查不到时退回单集水位，行为和以前一致。
+        targets: List[int] = self._pending_episodes(sub, self._now_dt()) if one_by_one else []
+        if one_by_one and not targets:
+            nxt = next_episode(sub)
+            if nxt is not None:
+                targets = [nxt]
+        target = targets[0] if targets else None
+        target_text = ("、".join(str(x) for x in targets) if targets else "")
         entry: dict[str, Any] = {
             "sub_id": sid, "sub": sub.get("name"), "sites": len(domains), "keyword": keyword,
             # 非计划时间触发的补跑，日志里标一下，方便核对「昨晚漏的今天补上了」
             "note": reason,
             "target": ("电影" if is_movie else
-                       (f"第 {target} 集" if target else ("全部未下集" if not one_by_one else "已补齐"))),
+                       (f"第 {target_text} 集" if targets
+                        else ("全部未下集" if not one_by_one else "已补齐"))),
             "found": 0, "submitted": 0, "status": "ok", "message": "",
             # 明细：站点 / 分辨率 / 集数 / 每条资源，运行记录里直接展示
             "site": "", "resolution": "", "episode": "", "items": [],
@@ -972,7 +1036,7 @@ class PtSubscriber(_PluginBase):
                          message="媒体库里已经有这部电影，不再重复下载（想换版本用「找资源」手动挑一条）")
             self._finish(sub, entry)
             return
-        if one_by_one and target is None:
+        if one_by_one and not targets:
             self._retry_state.pop(sid, None)
             self._cancel_retry(sid)
             entry.update(status="skipped", message="订阅集数已全部下完，无需补搜")
@@ -981,7 +1045,7 @@ class PtSubscriber(_PluginBase):
         try:
             result = self.bridge.search(domains, keyword, self._max_results)
             passed, _ = filter_candidates(sub, result["items"], self.store.hit_keys(),
-                                          target_ep=target)
+                                          target_ep=(targets or None))
             # 补老剧（没填集数区间）也要跳过台账里下过的集：
             # 否则把 1-10 删了腾空间，下一轮又会把 1-10 重新下回来
             if not one_by_one and not is_movie:
@@ -1005,8 +1069,8 @@ class PtSubscriber(_PluginBase):
                 seen_note = ""
                 if seen:
                     head = "、".join(str(e) for e in seen[:12]) + ("…" if len(seen) > 12 else "")
-                    want = f"第 {target} 集" if target else "目标集"
-                    if target and int(target) in seen:
+                    want = f"第 {target_text} 集" if targets else "目标集"
+                    if any(x in seen for x in targets):
                         seen_note = f"；站点已搜到第 {head} 集，{want}有资源但被规则/去重挡掉了"
                     else:
                         seen_note = f"；站点只搜到第 {head} 集，没有{want}"
@@ -1014,11 +1078,27 @@ class PtSubscriber(_PluginBase):
                              message=f"{entry['target']}还没更新{auth_note}{seen_note}；{wait}")
                 self._finish(sub, entry)
                 return
-            # 追更只挑一个版本；单片也只要一个；补老剧才一次收多条（每集留一个）
-            picks = passed[:1] if (one_by_one or is_movie) else passed[:5]
-            # 同一集只留一个版本，避免一次把同集的不同小组都下下来
-            if not one_by_one:
+            # 一轮挑选：追更时「每个目标集只留一个版本」（passed 已按做种数排序），
+            # 同一天连播的几集各得一条，一次全提交；电影只要一条；补老剧收 5 条。
+            if one_by_one:
                 seen_eps: set[int] = set()
+                picks: list[dict] = []
+                for row in passed:
+                    ep = row.get("episode")
+                    if ep is not None:
+                        ep = int(ep)
+                        if ep in seen_eps:
+                            continue
+                        seen_eps.add(ep)
+                    picks.append(row)
+                    if len(picks) >= max(1, len(targets)):
+                        break
+            elif is_movie:
+                picks = passed[:1]
+            else:
+                picks = passed[:5]
+                # 同一集只留一个版本，避免一次把同集的不同小组都下下来
+                seen_eps = set()
                 uniq: list[dict] = []
                 for row in picks:
                     ep = row.get("episode")
@@ -1073,22 +1153,26 @@ class PtSubscriber(_PluginBase):
             if titles:
                 self._retry_state.pop(sid, None)
                 self._cancel_retry(sid)
-                nxt = next_episode(self.store.get_sub(sid) or sub) if not is_movie else None
-                # 追更接力：这一集下完后，若还有「已播出但没下到」的集，2 分钟后自动接着补下一集。
-                # 以前只有「补跑」那一轮会接力，定时任务/手动「立即执行」下完就停，下一集要等
-                # 明天 19:00 或 2 小时后的补跑窗口——用户看到的就是「第 2 集明明有了却一直不下」。
+                cur = self.store.get_sub(sid) or sub
+                # 这一轮下完后再看还剩哪些「已播没下」：同一天连播两集、或积压几集时，
+                # 常常是其中一集站点还没出种，剩下的隔 2 分钟自动再补一轮。
+                left = self._pending_episodes(cur, self._now_dt()) if one_by_one else []
+                nxt = next_episode(cur) if not is_movie else None
                 # 补跑触发的那一轮（reason 非空）自带接力，这里不重复排，避免两个 job 抢同一集。
                 chained = False
-                if one_by_one and nxt is not None and not reason:
-                    cur = self.store.get_sub(sid) or sub
-                    if self._need_catchup(cur, self._now_dt()):
-                        chained = self._schedule_catchup(sid, 120, "追更接续", 2)
+                if one_by_one and left and not reason:
+                    chained = self._schedule_catchup(sid, 120, "追更接续", min(3, len(left)))
+                head = f"已提交 {len(titles)} 条"
+                if len(done_eps) > 1:
+                    head += f"（第 {'、'.join(str(e) for e in sorted(done_eps))} 集）"
                 if chained:
-                    tail = f"；2 分钟后自动接着补第 {nxt} 集"
+                    tail = f"；第 {'、'.join(str(x) for x in left)} 集还没种子，2 分钟后自动再补"
+                elif left:
+                    tail = f"；下一轮再补第 {'、'.join(str(x) for x in left)} 集"
                 else:
                     tail = (f"；下一集等第 {nxt} 集" if nxt
                             else ("；区间内已补齐" if one_by_one else ""))
-                entry["message"] = f"已提交 {len(titles)} 条：{titles[0][:40]}" + tail
+                entry["message"] = f"{head}：{titles[0][:40]}" + tail
             else:
                 msg = (submit.get("results") or [{}])[0].get("message") or "下载器未接受"
                 wait = self._schedule_retry(sid, sub)

@@ -5,7 +5,7 @@ import hashlib
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Iterable
 
 from pydantic import ValidationError
 
@@ -419,7 +419,7 @@ def filter_candidates(
     known: set[str],
     *,
     rules_override: RuleSet | dict | None = None,
-    target_ep: int | None = None,
+    target_ep: int | Iterable[int] | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """关键词/季/集数 → 规则 → 去重。返回 (通过, 淘汰含原因)。"""
     passed: list[dict] = []
