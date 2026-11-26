@@ -230,6 +230,53 @@ class Store:
         items.insert(0, {**hit, "at": _now()})
         self.backend.save("hits", items[: self.hit_limit])
 
+    # ---------------------------------------------- 站点资源偏好（上次用的编码/分辨率等）
+    def prefs(self) -> dict:
+        raw = self.backend.load("prefs", {}) or {}
+        return raw if isinstance(raw, dict) else {}
+
+    def remember_pref(self, domain: str, attrs: Any, title: str = "") -> None:
+        """记住「这个站点上次下的那种资源」，下次同站排序优先。
+
+        存的是插件数据里的一个独立键，不写日志：运行记录清空了偏好还在，
+        用户担心的「日志清理掉就忘了」不会发生。
+        """
+        domain = str(domain or "").strip().lower()
+        if not domain:
+            return
+        pref = pref_from_attrs(attrs)
+        if not (any(pref.get(k) for k in PREF_FIELDS)
+                or pref.get("cnsub") or pref.get("specsub")):
+            return
+        data = self.prefs()
+        old = data.get(domain) or {}
+        # 同一站点：用户刚下的这条就是最新规则；某项这次没识别出来就沿用上次的
+        merged = {k: (pref.get(k) or old.get(k) or []) for k in PREF_FIELDS}
+        merged["cnsub"] = bool(pref.get("cnsub") or old.get("cnsub"))
+        merged["specsub"] = bool(pref.get("specsub") or old.get("specsub"))
+        data[domain] = {**merged, "at": _now(), "sample": str(title or "")[:120]}
+        if len(data) > 40:
+            kept = sorted(data.items(), key=lambda kv: str((kv[1] or {}).get("at") or ""),
+                          reverse=True)[:40]
+            data = dict(kept)
+        self.backend.save("prefs", data)
+
+    def clear_prefs(self) -> None:
+        self.backend.save("prefs", {})
+
+    # ---------------------------------------------- 保存目录历史（输入过就记住）
+    def save_paths(self) -> list[str]:
+        raw = self.backend.load("save_paths", []) or []
+        return [str(x) for x in raw if str(x).strip()] if isinstance(raw, list) else []
+
+    def remember_save_path(self, path: str) -> None:
+        path = str(path or "").strip()
+        if not path:
+            return
+        items = [x for x in self.save_paths() if x != path]
+        items.insert(0, path)
+        self.backend.save("save_paths", items[:12])
+
     def logs(self) -> list[dict]:
         return list(self.backend.load("logs", []) or [])
 
@@ -451,3 +498,93 @@ def filter_candidates(
         if ok and key in known:
             row["reason"] = "已下载过"
     return passed, rejected
+
+
+# ---------------------------------------------------------------- 站点资源偏好
+
+PREF_FIELDS = ("resolutions", "codecs", "sources")
+
+_PREF_LABEL = {
+    "4k": "4K", "1080p": "1080p", "720p": "720p", "480p": "480p/SD",
+    "h264": "H.264", "h265": "H.265", "av1": "AV1", "vc1": "VC-1", "xvid": "XviD",
+    "webdl": "WEB-DL", "bluray": "BluRay", "remux": "REMUX", "hdtv": "HDTV",
+    "dvd": "DVD", "tc": "枪版",
+}
+
+
+def pref_from_attrs(attrs: Any) -> dict:
+    """把一条资源的属性压成可复用的偏好：只留分辨率 / 编码 / 来源 / 字幕。"""
+    data = attrs if isinstance(attrs, dict) else {}
+    out: dict[str, Any] = {}
+    for key in PREF_FIELDS:
+        values = [str(v) for v in (data.get(key) or []) if str(v or "").strip()]
+        if values:
+            out[key] = sorted(set(values))
+    out["cnsub"] = bool(data.get("cnsub"))
+    out["specsub"] = bool(data.get("specsub"))
+    return out
+
+
+def pref_text(pref: dict) -> str:
+    """「H.265 · 1080p · 中文字幕」这种人能读的摘要。"""
+    if not pref:
+        return ""
+    bits: list[str] = []
+    for key in PREF_FIELDS:
+        bits += [_PREF_LABEL.get(v, v.upper()) for v in (pref.get(key) or [])]
+    if pref.get("specsub"):
+        bits.append("特效字幕")
+    elif pref.get("cnsub"):
+        bits.append("中文字幕")
+    return " · ".join(dict.fromkeys(bits))
+
+
+def pref_score(item: dict, pref: dict) -> int:
+    """0 = 不相关；正数 = 和上次用的规则同款；负数 = 明显不同（往后排）。"""
+    if not pref:
+        return 0
+    attrs = item.get("attrs") or {}
+    score = 0
+    for key in PREF_FIELDS:
+        want = set(pref.get(key) or [])
+        got = set(attrs.get(key) or [])
+        if not want:
+            continue
+        if got & want:
+            score += 2
+        elif got:
+            score -= 1
+    if pref.get("specsub") or pref.get("cnsub"):
+        if attrs.get("specsub") or attrs.get("cnsub"):
+            score += 2
+        elif attrs.get("nosub"):
+            score -= 2
+    return score
+
+
+def sort_candidates(rows: list[dict], prefs: dict | None = None) -> list[dict]:
+    """同一集有多个版本时的排序：先按「这个站上次用的规则」，再看做种数。
+
+    只排不筛：偏好那种恰好这集没有时，其它版本照样能下，不会把结果筛没。
+    """
+    prefs = prefs or {}
+
+    def _key(row: dict) -> tuple:
+        domain = str(row.get("domain") or "").strip().lower()
+        pref = prefs.get(domain) or {}
+        return (-pref_score(row, pref), -(row.get("seeders") or 0), row.get("size_gb") or 0)
+
+    rows.sort(key=_key)
+    return rows
+
+
+def pref_summary(prefs: dict | None, domains: list[str] | None = None) -> str:
+    """给界面提示用：搜的这些站里，上次各用了什么规则（去重后合并成一行）。"""
+    prefs = prefs or {}
+    keys = [str(d or "").strip().lower() for d in (domains or [])] or list(prefs)
+    texts: list[str] = []
+    for key in keys:
+        text = pref_text(prefs.get(key) or {})
+        if text and text not in texts:
+            texts.append(text)
+    return "｜".join(texts[:3])

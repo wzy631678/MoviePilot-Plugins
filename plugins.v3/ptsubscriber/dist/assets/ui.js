@@ -1,5 +1,5 @@
 /* PtSubscriber 插件页面：原生 DOM，无构建工具，宿主注入的 api 负责鉴权。 */
-const UI_VERSION = '1.5.5';
+const UI_VERSION = '1.5.7';
 const CSS = `
 .pts-root,.pts-ov,.pts-libpop{--acc:#8b5cf6;--acc2:#a78bfa;--sur:#ffffff;--sur2:#f7f7fb;--sur3:#eeeef6;--on:#1f2230;--muted:rgba(31,34,48,.58);--line:rgba(17,24,39,.1);--soft:rgba(139,92,246,.12);--danger:#dc2626;--ok:#16a34a;--warn:#b45309}
 .pts-dark{--sur:#1b1e26;--sur2:#232733;--sur3:#2b3040;--on:#e9ebf2;--muted:rgba(233,235,242,.6);--line:rgba(255,255,255,.12);--soft:rgba(139,92,246,.22);--danger:#f87171;--ok:#4ade80;--warn:#fbbf24}
@@ -169,6 +169,17 @@ const CSS = `
 .pts-in:hover{border-color:rgba(139,92,246,.35)}
 .pts-in:focus{border-color:var(--acc);box-shadow:0 0 0 3px rgba(139,92,246,.16)}
 .pts-in::placeholder{color:var(--muted);opacity:.65}
+.pts-path{position:relative;display:flex;gap:6px;align-items:center;min-width:0}
+.pts-path .pts-in{flex:1}
+.pts-path-btn{flex:0 0 auto;width:34px;height:34px;display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--line);background:var(--sur);color:var(--muted);border-radius:10px;cursor:pointer;transition:.15s}
+.pts-path-btn:hover{color:var(--on);border-color:rgba(139,92,246,.35)}
+.pts-path.open .pts-path-btn{color:var(--acc);border-color:var(--acc)}
+.pts-path-menu{display:none;position:absolute;top:calc(100% + 4px);left:0;right:0;z-index:45;background:var(--sur);border:1px solid var(--line);border-radius:10px;box-shadow:0 10px 26px rgba(15,23,42,.16);padding:4px;max-height:210px;overflow:auto}
+.pts-path.open .pts-path-menu{display:block}
+.pts-path-item{display:block;width:100%;text-align:left;border:0;background:none;color:var(--on);font:inherit;font-size:12.6px;padding:7px 9px;border-radius:7px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pts-path-item:hover{background:rgba(139,92,246,.1)}
+.pts-path-item.on{color:var(--acc);font-weight:650}
+.pts-path-note{padding:8px 9px;font-size:11.8px;color:var(--muted);line-height:1.5}
 .pts-picker{border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--sur)}
 .pts-picker-bar{display:flex;gap:8px;align-items:center;padding:8px 9px;border-bottom:1px solid var(--line);background:var(--sur2);flex-wrap:wrap}
 .pts-picker-bar .pts-in{padding:6px 10px;font-size:12.5px;flex:1;min-width:120px}
@@ -306,6 +317,7 @@ const ICONS = {
   rewind: '<path d="M4 10a8 8 0 1 1 2 8.5"/><path d="M4 4.5V10h5.5"/>',
   bell: '<path d="M6 9.5a6 6 0 1 1 12 0c0 4.6 1.6 5.8 2.2 6.4H3.8c.6-.6 2.2-1.8 2.2-6.4Z"/><path d="M9.8 19a2.2 2.2 0 0 0 4.4 0"/>',
   importIn: '<path d="M12 3.5v9.5M8.2 9.2 12 13l3.8-3.8"/><path d="M4.5 15v4.5h15V15"/>',
+  chevron: '<path d="m6 9.5 6 6 6-6"/>',
 };
 
 function el(tag, cls, text) {
@@ -474,6 +486,53 @@ function textInput(value, type, placeholder) {
   node.value = value === undefined || value === null ? '' : String(value);
   if (placeholder) node.placeholder = placeholder;
   return node;
+}
+
+/* 保存目录：输入框 + 历史下拉。
+   在「找资源」或订阅里填过一次的目录会被记住（后端也存），下次点箭头直接选，
+   免得手打错一个字符（「观影」打成「观察」）就下到别的目录去了。 */
+function savePathInput(value, placeholder, paths) {
+  const wrap = el('div', 'pts-path');
+  const input = textInput(value, 'text', placeholder);
+  const btn = el('button', 'pts-path-btn');
+  btn.type = 'button';
+  btn.title = '从历史目录里选';
+  btn.append(iconEl('chevron', 14));
+  const menu = el('div', 'pts-path-menu');
+  wrap.append(input, btn, menu);
+
+  const items = () => {
+    const list = typeof paths === 'function' ? paths() : (paths || []);
+    return (list || []).map((p) => String(p || '').trim()).filter(Boolean);
+  };
+  const close = () => wrap.classList.remove('open');
+  const paint = () => {
+    menu.innerHTML = '';
+    const list = items();
+    if (!list.length) {
+      menu.append(el('div', 'pts-path-note',
+        '还没有记录：这里填一次（填目录名或完整路径都行），下次就能直接选。'));
+      return;
+    }
+    for (const p of list) {
+      const row = el('button', 'pts-path-item' + (p === input.value.trim() ? ' on' : ''), p);
+      row.type = 'button';
+      // 先 preventDefault，避免 input 失焦时菜单先关了导致点不中
+      row.addEventListener('mousedown', (ev) => ev.preventDefault());
+      row.addEventListener('click', () => { input.value = p; close(); input.focus(); });
+      menu.append(row);
+    }
+  };
+  const open = () => { paint(); wrap.classList.add('open'); };
+  btn.addEventListener('click', () => {
+    if (wrap.classList.contains('open')) close(); else open();
+  });
+  input.addEventListener('focus', () => { if (items().length) open(); });
+  input.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') close(); });
+  document.addEventListener('mousedown', (ev) => {
+    if (!wrap.contains(ev.target)) close();
+  });
+  return { node: wrap, input };
 }
 
 function select(options, value) {
@@ -1867,8 +1926,10 @@ export function mountUI(root, api, opts) {
     const fDownloader = select([{ value: '', label: 'MP 默认下载器' }].concat(
       dlOptions.map((d) => ({ value: d.name, label: d.name + '（' + d.type + '）' }))),
       sub ? sub.downloader_id : '');
-    const fSavePath = textInput(sub ? sub.save_path : '', 'text', '留空用下载器默认目录');
-    g1c.append(field('下载器', fDownloader), field('保存目录', fSavePath));
+    const fSavePath = savePathInput(sub ? sub.save_path : '',
+      '留空用下载器默认目录；填目录名=默认目录下建子文件夹',
+      () => (state.options && state.options.save_paths) || []);
+    g1c.append(field('下载器', fDownloader), field('保存目录', fSavePath.node));
     sec1.append(g1c);
 
     const tglWrap = el('div', 'pts-bar');
@@ -2007,7 +2068,7 @@ export function mountUI(root, api, opts) {
     }
     function escClose(e) { if (e.key === 'Escape') closeForm(); }
 
-    const syncBound = [fName, fSeason, fEpStart, fEpEnd, fRecommend, fSavePath,
+    const syncBound = [fName, fSeason, fEpStart, fEpEnd, fRecommend, fSavePath.input,
       fSubtitle, fPromotion, fHdr, fMinSize, fMaxSize, fSeeders, fTime, fInterval,
       fRetry, fWindow, fDownloader, fWeekday];
     for (const node of syncBound) {
@@ -2074,9 +2135,18 @@ export function mountUI(root, api, opts) {
 
       const dl = dlOptions.find((d) => d.name === fDownloader.value);
       sum.downloader.textContent = dl ? dl.name + '（' + dl.type + '）' : 'MP 默认';
-      const path = fSavePath.value.trim();
-      fSavePath.placeholder = dl && dl.save_path ? '留空用：' + dl.save_path : '留空用下载器默认目录';
-      sum.target.textContent = path || (dl && dl.save_path ? dl.save_path + '（默认）' : '下载器默认目录');
+      const path = fSavePath.input.value.trim();
+      const dlBase = dl && dl.save_path ? String(dl.save_path).replace(/\/+$/, '') : '';
+      fSavePath.input.placeholder = dlBase
+        ? '留空用：' + dlBase + '；填目录名=其下建子文件夹'
+        : '留空用下载器默认目录；填目录名=默认目录下建子文件夹';
+      // 填相对名（如「观影」）时说明会落在默认目录下的子文件夹，避免误以为不生效
+      const resolved = !path ? ''
+        : (path.startsWith('/')
+          ? path
+          : (dlBase ? dlBase + '/' + path.replace(/^\/+/, '')
+                    : '下载器默认目录/' + path.replace(/^\/+/, '')));
+      sum.target.textContent = resolved || (dlBase ? dlBase + '（默认）' : '下载器默认目录');
 
       const rr = collectRules();
       sum.rules.textContent = rulesSummary(rr) || '不限（推荐）';
@@ -2251,7 +2321,7 @@ export function mountUI(root, api, opts) {
         rules: collectRules(),
         downloader_id: fDownloader.value,
         qb_category: '',
-        save_path: fSavePath.value.trim(),
+        save_path: fSavePath.input.value.trim(),
         schedule_mode: segMode.get() === 'recommend' ? 'recommend' : 'weekly',
         schedule_time: fTime.value || '19:00',
         schedule_weekday: fWeekday.value,
@@ -2299,6 +2369,11 @@ export function mountUI(root, api, opts) {
           return;
         }
         const savedId = (r.item || {}).id || payload.id;
+        // 刚填的保存目录进本地下拉，下次新建订阅直接能选
+        if (payload.save_path && state.options) {
+          const list = state.options.save_paths || (state.options.save_paths = []);
+          if (!list.includes(payload.save_path)) list.unshift(payload.save_path);
+        }
         if (!thenRun) {
           closeForm();
           await reloadSubs();
@@ -2466,8 +2541,9 @@ export function mountUI(root, api, opts) {
     const dlOptions = [{ value: '', label: 'MP 默认下载器' }].concat(
       (state.options.downloaders || []).map((d) => ({ value: d.name, label: d.name })));
     const fDownloader = select(dlOptions, '');
-    const fSavePath = textInput('', 'text', '留空用下载器默认目录');
-    g.append(field('关键词', fKeyword), field('下载器', fDownloader), field('保存目录', fSavePath));
+    const fSavePath = savePathInput('', '留空用下载器默认目录；填目录名=默认目录下建子文件夹',
+      () => (state.options && state.options.save_paths) || []);
+    g.append(field('关键词', fKeyword), field('下载器', fDownloader), field('保存目录', fSavePath.node));
     card.append(g);
 
     // 和订阅一样对接 TMDB：先认准是哪个作品（动漫版 / 真人版），再按它的标题去站点搜
@@ -2518,7 +2594,9 @@ export function mountUI(root, api, opts) {
         state.result = r;
         state.selected.clear();
         state.onlyMatch = false;
-        status.textContent = `共 ${r.items.length} 条，符合规则 ${r.passed} 条`;
+        // 同站上次用的是什么规则（H.265 / 1080p / 中字）也说一句：排序就是按它走的
+        status.textContent = `共 ${r.items.length} 条，符合规则 ${r.passed} 条`
+          + (r.pref ? ` · 按上次规则优先：${r.pref}` : '');
         drawResults();
       } catch (e) {
         status.textContent = String(e && e.message ? e.message : e);
@@ -2531,18 +2609,33 @@ export function mountUI(root, api, opts) {
       if (!state.result || !state.selected.size) { status.textContent = '请先勾选资源'; return; }
       const keys = Array.from(state.selected);
       const titles = {};
-      for (const item of state.result.items) titles[item.key] = item.display_title || item.title;
+      const chosenItems = [];
+      for (const item of state.result.items) {
+        titles[item.key] = item.display_title || item.title;
+        if (!state.selected.has(item.key)) continue;
+        // 带上 attrs：下完插件就记住这个站用的编码/分辨率，下次同站优先
+        chosenItems.push({
+          key: item.key, domain: item.domain || '', attrs: item.attrs || {},
+          title: item.display_title || item.title || '',
+        });
+      }
       try {
         const r = await call('POST', 'download', {
-          token: state.result.token, keys, titles,
+          token: state.result.token, keys, titles, items: chosenItems,
           downloader: fDownloader.value, category: '',
-          save_path: fSavePath.value.trim(),
+          save_path: fSavePath.input.value.trim(),
           // 找资源页不绑订阅，带 TMDB 认准的片名下去，命中记录和 QQ 通知里能看出下的是哪部
           sub: (state.searchedMeta && state.searchedMeta.title) || fKeyword.value.trim() || '',
           sub_id: '',
         });
         const ok = (r.results || []).filter((x) => x.ok).length;
         status.textContent = r.ok ? `已提交 ${ok}/${keys.length} 条` : (r.message || '提交失败');
+        // 刚填的目录立刻进下拉（找资源页不会重载 options，这里手动补一条）
+        const usedPath = fSavePath.input.value.trim();
+        if (ok && usedPath && state.options) {
+          const list = state.options.save_paths || (state.options.save_paths = []);
+          if (!list.includes(usedPath)) list.unshift(usedPath);
+        }
         await reloadAll();
       } catch (e) { status.textContent = String(e && e.message ? e.message : e); }
     }, 'primary'));
@@ -2552,6 +2645,13 @@ export function mountUI(root, api, opts) {
       drawResults();
     }));
     actionBar.append(button('清空选择', () => { state.selected.clear(); drawResults(); }));
+    // 记错了规则（比如某站手滑下了 H.264）时一键回到「只看做种数」
+    actionBar.append(button('忘记资源偏好', async () => {
+      try {
+        const r = await call('POST', 'pref/clear', {});
+        status.textContent = r.ok ? '已清空资源偏好，之后按做种数排序' : (r.message || '清空失败');
+      } catch (e) { status.textContent = String(e && e.message ? e.message : e); }
+    }));
     actionBar.append(status);
     p.append(actionBar, resultBox);
 

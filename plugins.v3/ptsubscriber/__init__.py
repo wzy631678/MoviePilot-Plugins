@@ -23,7 +23,7 @@ except ImportError:  # 兼容旧版宿主
     logger = logging.getLogger("PtSubscriber")
 
 from . import intercept, remote, remote_ui
-from .core import Store, filter_candidates
+from .core import Store, filter_candidates, pref_score, pref_summary, sort_candidates
 from .meta import poster_url as meta_poster_url
 from .meta import resolve as resolve_meta
 from .meta import search as search_meta
@@ -260,7 +260,7 @@ def _name_tier(core: str, title: str) -> int:
 class PtSubscriber(_PluginBase):
     plugin_name = "定时订阅下载"
     plugin_desc = "默认按 TMDB 推荐更新时间自动到指定站点搜资源（也可自选每天/每周指定星期几点），按详细规则下载到指定容器；自动对接 TMDB，按片名、年份、剧集/电影、集数逐项比对，只把真正这部排在最前，并把每集播出日列成表；读媒体库只补没入库的集，已下过的（含删掉的）不重下。聊天入口不用打斜杠，一条说全最省事：「订阅 天下第一 观众 1080P 周一5:30」（片名/站点/清晰度/周期顺序随意）；也可以只发「订阅 天才女友」先列同名作品，回序号后再选「从第几集 / 哪些站 / 多久刷一次」，回「确定」立刻补搜并把能下的资源列出来让你挑；「查资源 仙逆 馒头 1080P」只搜一轮直接下，不建订阅。斜杠命令 /ptsub、/ptfind、/ptlist 一样可用；回复全是纯文本不带图。"
-    plugin_version = "1.10.26"
+    plugin_version = "1.10.28"
     plugin_author = "wzy"
     plugin_config_prefix = "ptsubscriber_"
     plugin_order = 90
@@ -516,6 +516,7 @@ class PtSubscriber(_PluginBase):
             {"path": "/sub/run", "endpoint": self.api_sub_run, "methods": ["POST"], "summary": "立即试运行"},
             {"path": "/search", "endpoint": self.api_search, "methods": ["POST"], "summary": "按站点搜索资源"},
             {"path": "/download", "endpoint": self.api_download, "methods": ["POST"], "summary": "提交种子到下载器"},
+            {"path": "/pref/clear", "endpoint": self.api_pref_clear, "methods": ["POST"], "summary": "清空站点资源偏好"},
         ]
         for route in routes:
             route["auth"] = "bear"
@@ -1057,8 +1058,9 @@ class PtSubscriber(_PluginBase):
                 if done_eps:
                     passed = [r for r in passed
                               if not (r.get("episode") and int(r["episode"]) in done_eps)]
-            # 同一集可能有多个版本：按做种数优先，挑最稳的
-            passed.sort(key=lambda x: (-(x.get("seeders") or 0), x.get("size_gb") or 0))
+            # 同一集可能有多个版本（H.264 / H.265 / 不同小组）：先按「这个站点上次用的规则」
+            # 排（用户要求同站统一），同规则内再看做种数，挑最稳的
+            passed = sort_candidates(passed, self.store.prefs())
             entry["found"] = len(passed)
             if not passed:
                 wait = self._schedule_retry(sid, sub)
@@ -1140,6 +1142,8 @@ class PtSubscriber(_PluginBase):
                     "episode": pick.get("episode"),
                     "status": "submitted",
                 })
+                # 记住这个站这次下的资源类型（编码/分辨率/字幕）：下次同站同集多版本时优先它
+                self.store.remember_pref(pick.get("domain") or site, pick.get("attrs"), title)
                 if pick.get("episode"):
                     done_eps.append(int(pick["episode"]))
                 titles.append(title)
@@ -1388,8 +1392,22 @@ class PtSubscriber(_PluginBase):
             searchable = self.bridge.searchable_domains()
             for site in sites:
                 site["searchable"] = (not searchable) or site["domain"].lower() in searchable
+            # 保存目录下拉的历史：最近填过的 → 各订阅用过的 → 下载器默认目录
+            paths: list[str] = []
+            for path in self.store.save_paths():
+                if path not in paths:
+                    paths.append(path)
+            for sub in self.store.subs():
+                path = str(sub.get("save_path") or "").strip()
+                if path and path not in paths:
+                    paths.append(path)
+            for dl in downloaders:
+                path = str(dl.get("save_path") or "").strip()
+                if path and path not in paths:
+                    paths.append(path)
             return {"ok": True, "sites": sites, "downloaders": downloaders,
                     "rule_options": RULE_OPTIONS, "timezone": TZ,
+                    "save_paths": paths[:20],
                     "scheduler_running": bool(self._scheduler and self._scheduler.running)}
         except Exception as exc:
             return {"ok": False, "message": f"{type(exc).__name__}: {str(exc)[:200]}"}
@@ -1885,6 +1903,8 @@ class PtSubscriber(_PluginBase):
             library_eps = payload.pop("library_eps", None)
             old = self.store.get_sub(str(payload.get("id") or ""))
             sub = self.store.upsert_sub(payload)
+            # 订阅里填的保存目录同样进历史：下次新建订阅/找资源直接下拉选
+            self.store.remember_save_path(str(sub.get("save_path") or ""))
             if library_eps:
                 try:
                     eps = [int(x) for x in library_eps if str(x).strip().isdigit()]
@@ -1976,8 +1996,12 @@ class PtSubscriber(_PluginBase):
             }
             passed, rejected = filter_candidates(pseudo, result["items"], known,
                                                  rules_override=rules)
+            # 「找资源」也按同站上次用的规则排：手挑的时候第一眼看到的就是平时下惯的那种
+            prefs = self.store.prefs()
+            passed = sort_candidates(passed, prefs)
             return {"ok": True, "token": result["token"], "items": passed + rejected,
-                    "passed": len(passed), "errors": result["errors"]}
+                    "passed": len(passed), "errors": result["errors"],
+                    "pref": pref_summary(prefs, domains)}
         except Exception as exc:
             return {"ok": False, "message": f"{type(exc).__name__}: {str(exc)[:200]}"}
 
@@ -1992,8 +2016,13 @@ class PtSubscriber(_PluginBase):
                 str(data.get("downloader") or ""), str(data.get("category") or ""),
                 str(data.get("save_path") or ""),
             )
+            # 保存目录填过一次就记住：下次下拉直接选，省得手打（「观影」打成「观察」这种）
+            self.store.remember_save_path(str(data.get("save_path") or ""))
             # 手动下载也要留痕 + 推通知：用户反馈过「找资源里下完了，QQ 一点动静没有」
             titles = data.get("titles") or {}
+            # 前端顺手带上所选资源的 attrs：下完就记住这个站的编码/分辨率，下次同站优先
+            detail = {str(it.get("key")): it for it in (data.get("items") or [])
+                      if isinstance(it, dict)}
             src = str(data.get("sub") or "").strip() or "手动下载"
             accepted = []
             for row in result.get("results", []):
@@ -2001,6 +2030,9 @@ class PtSubscriber(_PluginBase):
                     continue
                 title = titles.get(row["key"]) or row["key"]
                 accepted.append(title)
+                extra = detail.get(str(row["key"])) or {}
+                self.store.remember_pref(extra.get("domain") or extra.get("site"),
+                                         extra.get("attrs"), title)
                 self.store.add_hit({
                     "sub_id": str(data.get("sub_id") or ""), "sub": src,
                     "dedup_key": row["key"], "title": title,
@@ -2015,6 +2047,14 @@ class PtSubscriber(_PluginBase):
                     lines.append(f"……共 {len(accepted)} 条")
                 self._notify(f"✅ 已提交下载｜{src} {len(accepted)} 条", "\n".join(lines))
             return result
+        except Exception as exc:
+            return {"ok": False, "message": f"{type(exc).__name__}: {str(exc)[:200]}"}
+
+    def api_pref_clear(self) -> dict:
+        """清空「同站按上次规则优先」的记忆，回到纯做种数排序。"""
+        try:
+            self.store.clear_prefs()
+            return {"ok": True, "message": "已清空站点资源偏好"}
         except Exception as exc:
             return {"ok": False, "message": f"{type(exc).__name__}: {str(exc)[:200]}"}
 
@@ -2507,7 +2547,7 @@ class PtSubscriber(_PluginBase):
                           if intent.get("resolution") else {})
         passed, _ = filter_candidates(pseudo, result.get("items") or [], set(),
                                       rules_override=rules_override)
-        passed = self._rank_rows(name, passed)
+        passed = self._rank_rows(name, passed, self.store.prefs())
         if not passed:
             return (f"「{name}」没搜到可用资源。\n"
                     "换个片名写法，或去掉集数限制，或去插件页确认站点可搜索。"
@@ -2522,19 +2562,22 @@ class PtSubscriber(_PluginBase):
         return self._dl_text(self._pending_dl[key], key)
 
     @staticmethod
-    def _rank_rows(name: str, rows: list) -> list:
-        """名称精准命中优先，组内按做种从多到少。
+    def _rank_rows(name: str, rows: list, prefs: dict | None = None) -> list:
+        """名称精准命中优先，组内按「站点上次用的规则」→ 做种从多到少。
 
         PT 站关键词搜索会给一堆同名前缀/同名作品（搜「天下第一」会混进
         《天下第一剑》《天下第一楼》）。这里按「标题剥掉集数/年份/季之后和
         片名完全一致」→「标题带片名」→「片名带标题」→「勉强沾边」分层，
-        每一层内部都按做种从多到少排——名称对得上的先列，做种多的先下。
+        每一层内部先按同站历史偏好（编码/分辨率/字幕），再做种从多到少排。
         """
         core = _norm_name(name)
+        prefs = prefs or {}
 
         def _key(r: dict):
             title = str(r.get("display_title") or r.get("title") or "")
+            pref = prefs.get(str(r.get("domain") or "").strip().lower()) or {}
             return (_name_tier(core, title),
+                    -pref_score(r, pref),
                     -(r.get("seeders") or 0),
                     r.get("size_gb") or 0)
 
@@ -2615,6 +2658,10 @@ class PtSubscriber(_PluginBase):
                 "size_gb": c.get("size_gb"),
                 "downloader": result.get("downloader"), "status": "submitted",
             })
+            # 远程直下也记偏好：QQ/微信里挑过 H.265，网页订阅下一轮就跟着用 H.265
+            self.store.remember_pref(c.get("domain") or c.get("site"),
+                                     c.get("attrs"),
+                                     c.get("display_title") or c.get("title") or "")
         if not done:
             msg = (result.get("results") or [{}])[0].get("message") or "下载器未接受"
             return f"没下成：{msg}"
@@ -2746,7 +2793,7 @@ class PtSubscriber(_PluginBase):
                           if rules.get("resolutions") else {})
         passed, _ = filter_candidates(pseudo, result.get("items") or [], set(),
                                       rules_override=rules_override)
-        passed = self._rank_rows(name, passed)
+        passed = self._rank_rows(name, passed, self.store.prefs())
         if not passed:
             tail = self._search_fail_reason(result)
             return ("顺手先搜了一轮：现在还没搜到能下的资源，到计划时间会自动再搜。" + tail,

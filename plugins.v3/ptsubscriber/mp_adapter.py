@@ -447,6 +447,14 @@ class MPBridge:
             if name in params:
                 kwargs[name] = download_dir or None
                 break
+
+        # 指定了保存目录时必须关掉 qb 的「自动分类管理」（autoTMM）。
+        # 开启时 qb 会无视传入的 save_path，按分类归到默认目录 —— 用户反馈
+        # 「保存目录填了却没生效」就是卡在这里：种子全落到 downloads 根目录。
+        if download_dir and is_qb and has_kwargs:
+            kwargs["ignore_category_check"] = False
+            category = ""  # 分类同样会覆盖 save_path，明确指定目录时以目录为准
+
         if cookie and "cookie" in params:
             kwargs["cookie"] = cookie
 
@@ -468,6 +476,35 @@ class MPBridge:
                 kwargs["category"] = category
         return kwargs
 
+    def _resolve_save_path(self, inst: Any, save_path: str) -> str:
+        """把用户填的保存目录规范成 qb 能用的绝对路径。
+
+        用户经常只填一个目录名（比如「观影」），期望在下载器默认目录下建这个
+        子文件夹。但 qb 只认绝对路径，收到「观影」就直接忽略、退回默认目录 ——
+        这正是「填了保存目录却没生效」的根源。这里把相对名拼到默认目录后面。
+        """
+        p = (save_path or "").strip()
+        if not p:
+            return ""
+        if p.startswith("/"):
+            return p  # 已经是绝对路径，原样用
+        base = ""
+        try:
+            qbc = getattr(inst, "qbc", None)
+            if qbc is not None:
+                prefs = qbc.app.preferences() or {}
+                base = str(prefs.get("save_path") or "")
+        except Exception:  # noqa: BLE001 - 取不到就退回原值，不影响添加
+            base = ""
+        if not base:
+            try:
+                base = str(inst.get_default_save_path() or "")
+            except Exception:  # noqa: BLE001
+                base = ""
+        if not base:
+            return p  # 实在拿不到默认目录，原样传，交给下载器兜底
+        return base.rstrip("/") + "/" + p.strip("/")
+
     def submit(self, token: str, keys: list[str], downloader: str,
                category: str, save_path: str) -> dict:
         from app.chain.download import DownloadChain
@@ -486,6 +523,7 @@ class MPBridge:
         inst = service.instance
         is_qb = str(getattr(service, "type", "") or "").lower() == "qbittorrent"
         system_tag = self._system_tag()
+        save_path = self._resolve_save_path(inst, save_path)
 
         results: list[dict] = []
         for key in keys:
