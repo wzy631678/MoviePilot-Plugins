@@ -399,8 +399,10 @@ def air_dates(tmdb_id: int, season: int | None = None) -> dict:
         "last_air_date": last["air_date"] if last else "",
         "next_ep": next_["ep"] if next_ else None,
         "next_air_date": next_["air_date"] if next_ else "",
-        # 只回最近 40 集，够看下一段时间的更新节奏
-        "eps": eps[-40:],
+        # 整季播出表全给：订阅 1-59 时用户要看到全部集（不只最近 40 集），
+        # 否则「每集更新时间」只列后半段，像从第 20 集才开始（11/27 用户反馈）。
+        # 单季一般不到百集，全返回压力不大；前端会按订阅区间过滤展示。
+        "eps": eps,
     }
 
 
