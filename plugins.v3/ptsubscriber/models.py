@@ -180,21 +180,26 @@ def parse_season(title: str) -> int | None:
 
 
 def next_episode(sub: dict) -> int | None:
-    """下一个要下的集数：从「已经下到的最高集」往后走一格；电影或追完返回 None。
+    """下一个要下的集数：区间内**第一个还没下到**的集；电影或区间补完返回 None。
 
-    这里**不能**用「第一个缺失集」的算法。用户看完就删、或者某批下载转移失败，
-    中间那几集在任何持久记录里都查不到，按缺口补就会把 44 又下一遍
-    （11/21 晚《光阴之外》重下第 43 集就是这么来的）。
-    改为水位式：只要下到过 48，下一集就是 49，绝不回头补旧集。
+    这里用「第一个缺失集」而不是「最高集 + 1」。原因（11/27 用户反馈）：
+    订阅《大夏守墓人》1-59，台账里下过 7~13、19、20，但 1~6、14~18 从未下过。
+    水位式（最高 20 + 1 = 21）会让 1~6、14~18 永远补不上，从第 1 集开始订阅却
+    直接从 21 追，明显不对。
+
+    防重下的关键不在这个函数，而在 _sync_library：它每轮把「媒体库存量 ∪ 下载/转移
+    历史」并进 delivered_eps，所以「下到过、后来看完删掉」的集仍留在台账里，不会被
+    当成缺失。真正会重下的只有「下过且 MP 下载/转移记录也被清」的极端情况。
     """
     if (sub.get("kind") or "series") == "movie":
         return None
     start = int(sub.get("ep_start") or 1)
     end = int(sub.get("ep_end") or 999)
     done = {int(x) for x in (sub.get("delivered_eps") or [])}
-    high = max(done) if done else 0
-    ep = high + 1 if high >= start else start
-    return ep if ep <= end else None
+    for ep in range(start, end + 1):
+        if ep not in done:
+            return ep
+    return None
 
 
 def recommend_from_air(air: dict) -> tuple[str, str]:
