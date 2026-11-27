@@ -260,7 +260,7 @@ def _name_tier(core: str, title: str) -> int:
 class PtSubscriber(_PluginBase):
     plugin_name = "定时订阅下载"
     plugin_desc = "默认按 TMDB 推荐更新时间自动到指定站点搜资源（也可自选每天/每周指定星期几点），按详细规则下载到指定容器；自动对接 TMDB，按片名、年份、剧集/电影、集数逐项比对，只把真正这部排在最前，并把每集播出日列成表；读媒体库只补没入库的集，已下过的（含删掉的）不重下。聊天入口不用打斜杠，一条说全最省事：「订阅 天下第一 观众 1080P 周一5:30」（片名/站点/清晰度/周期顺序随意）；也可以只发「订阅 天才女友」先列同名作品，回序号后再选「从第几集 / 哪些站 / 多久刷一次」，回「确定」立刻补搜并把能下的资源列出来让你挑；「查资源 仙逆 馒头 1080P」只搜一轮直接下，不建订阅。斜杠命令 /ptsub、/ptfind、/ptlist 一样可用；回复全是纯文本不带图。"
-    plugin_version = "1.10.28"
+    plugin_version = "1.10.29"
     plugin_author = "wzy"
     plugin_config_prefix = "ptsubscriber_"
     plugin_order = 90
@@ -678,9 +678,9 @@ class PtSubscriber(_PluginBase):
         eps = air.get("eps") or []
         if not eps:
             return []
-        # 水位下限：只从「已经下到的最高集 + 1」往后算。
-        # 绝不按「缺口」回头补中间那几集——那些多半是看完删掉/转移失败的，
-        # 回头补就会把老集重下一遍（《光阴之外》第 43 集重下就是这么来的）。
+        # 下限：只从「区间内第一个还没下到的集」往后算（补缺口语义）。
+        # 已下的集（含看完删掉、但下载/转移记录还在的）在 done 里会被跳过，
+        # 不会重下；真正缺失的（如《大夏守墓人》1~6、14~18）会补上。
         floor = next_episode(sub)
         if floor is None:
             return []
@@ -694,15 +694,24 @@ class PtSubscriber(_PluginBase):
             fh, fm = 19, 0
         # 今天才播的集要等当天计划时间点之后才认：白天站点多半还没出种
         allow_today = now >= now.replace(hour=fh, minute=fm, second=0, microsecond=0)
+        # 节目表确认「已播出」的最后一集：有日期且不晚于今天的最大集号。
+        # TMDB 常漏记前面几集的 air_date（《大夏守墓人》只给了 20 之后的），
+        # 但只要第 N 集都播了，第 N-1、N-2… 必然也播了，集号 <= last_ep 的都算已播。
+        last_ep = int(air.get("last_ep") or 0)
         out: List[int] = []
-        for row in eps:
-            ep = int(row.get("ep") or 0)
-            day = str(row.get("air_date") or "")[:10]
-            if not ep or not day or ep in done or ep in out:
+        for ep in range(max(start, floor), (end or last_ep or floor) + 1):
+            if ep in done or ep in out:
                 continue
-            if ep < floor or ep < start or (end and ep > end):
+            if end and ep > end:
                 continue
-            if day < today or (day == today and allow_today):
+            # 节目表里有的集按播出日判断；没有日期的按「是否已到 last_ep」保守放行
+            row = next((r for r in eps if int(r.get("ep") or 0) == ep), None)
+            if row:
+                day = str(row.get("air_date") or "")[:10]
+                if day and (day < today or (day == today and allow_today)):
+                    out.append(ep)
+            elif last_ep and ep <= last_ep:
+                # TMDB 漏记日期、但显然已播（第 last_ep 集都出了）：补
                 out.append(ep)
         return sorted(out)
 
@@ -748,8 +757,14 @@ class PtSubscriber(_PluginBase):
             # 节目表有集数据但一集都还没播（新剧还没开播），或今天才播还没到点
             # → 确实没得下，别白搜
             return not eps
-        high = max((int(x) for x in (sub.get("delivered_eps") or [])), default=0)
-        return max(aired) > high
+        # 有「已播但台账还没下到」的集（含中间缺口）就算漏了。
+        # 只看最高水位不够：《大夏守墓人》已播到 20、台账也下到 20，但 1~6、14~18
+        # 从没下过，仍要补。真正下过（含看完删掉、转移记录还在）的集在 delivered_eps 里。
+        done = {int(x) for x in (sub.get("delivered_eps") or [])}
+        start = int(sub.get("ep_start") or 0) or 1
+        end = int(sub.get("ep_end") or 0) or 0
+        return any((ep not in done) and (not end or ep <= end)
+                   for ep in aired if ep >= start)
 
     def _catch_up_scan(self, boot: bool = False) -> None:
         """扫一遍有没有「该跑没跑 / 跑了没下到」的订阅，有就排队补跑。
